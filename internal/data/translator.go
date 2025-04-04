@@ -161,12 +161,13 @@ Original fields:
 
 	// Add each stat effect for translation if available
 	if len(fields.StatEffectTexts) > 0 {
-		prompt += "\nStat Effects:\n"
+		prompt += "\nIMPORTANT - Stat Effects (each one MUST be translated individually):\n"
 		for i, effectText := range fields.StatEffectTexts {
 			if effectText != "" {
-				prompt += fmt.Sprintf("- Effect_%d: %s\n", i+1, effectText)
+				prompt += fmt.Sprintf("- Stat_Effect_%d: %s\n", i+1, effectText)
 			}
 		}
+		prompt += "\nAll stat effects must be translated individually with their own separate translation in the response JSON.\n"
 	}
 
 	prompt += `
@@ -187,12 +188,17 @@ Return only a JSON object with the translated fields in this exact format:
 	if len(fields.StatEffectTexts) > 0 {
 		for i := range fields.StatEffectTexts {
 			if fields.StatEffectTexts[i] != "" {
-				prompt += fmt.Sprintf(",\n  \"stat_effect_%d\": \"[Vietnamese translation]\"", i+1)
+				prompt += fmt.Sprintf(",\n  \"stat_effect_%d\": \"[Vietnamese translation of Stat_Effect_%d]\"", i+1, i+1)
 			}
 		}
 	}
 
 	prompt += "\n}"
+
+	// Add final instruction to emphasize importance of translating all stat effects
+	if len(fields.StatEffectTexts) > 0 {
+		prompt += "\n\nCritical: Ensure EACH stat effect gets its own translation. Do not merge stat effects."
+	}
 
 	return prompt
 }

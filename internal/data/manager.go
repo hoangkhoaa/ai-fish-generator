@@ -1694,25 +1694,27 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	}
 
 	// Prepare text for each stat effect to be translated
-	statEffectTexts := make([]string, 0, len(statEffects))
-	statEffectTypes := make([]string, 0, len(statEffects))
+	statEffectTexts := make([]string, 0, len(statEffects)*2) // Allow for descriptions and weather types
+	statEffectTypes := make([]string, 0, len(statEffects)*2)
 
+	// First pass: get all descriptions (keeping their index aligned with the stat effects array)
 	for _, effect := range statEffects {
-		effectType, _ := effect["effect_type"].(string)
-		statEffectTypes = append(statEffectTypes, effectType)
-
-		if description, ok := effect["description"].(string); ok {
+		// Add the description to the list (even if empty, to maintain indexing)
+		if description, ok := effect["description"].(string); ok && description != "" {
 			statEffectTexts = append(statEffectTexts, description)
+			statEffectTypes = append(statEffectTypes, "description")
 		} else {
+			// Add an empty placeholder to maintain indexing
 			statEffectTexts = append(statEffectTexts, "")
+			statEffectTypes = append(statEffectTypes, "description")
 		}
+	}
 
-		// Include weather_type or other special fields based on effect type
-		if effectType == "environment" {
-			if weatherType, ok := effect["weather_type"].(string); ok {
-				statEffectTexts = append(statEffectTexts, weatherType)
-				statEffectTypes = append(statEffectTypes, "weather_type")
-			}
+	// Second pass: add all weather_type fields (will be indexed after all descriptions)
+	for _, effect := range statEffects {
+		if weatherType, ok := effect["weather_type"].(string); ok && weatherType != "" {
+			statEffectTexts = append(statEffectTexts, weatherType)
+			statEffectTypes = append(statEffectTypes, "weather_type")
 		}
 	}
 
@@ -1797,31 +1799,39 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 
 	// Process translated stat effects
 	for _, effect := range statEffects {
-		effectType, _ := effect["effect_type"].(string)
-
 		// Create a deep copy of the original effect
 		translatedEffect := make(map[string]interface{})
 		for k, v := range effect {
 			translatedEffect[k] = v
 		}
 
-		// Add Vietnamese translations based on effect type
-		if effectType == "environment" {
-			if statEffectIndex < len(translatedFields.StatEffectTexts) {
-				translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
-				statEffectIndex++
-			}
+		// Get the description from the original effect
+		_, hasDesc := effect["description"].(string)
 
-			// Look for weather type translation
-			if statEffectIndex < len(translatedFields.StatEffectTexts) && statEffectTypes[statEffectIndex] == "weather_type" {
-				translatedEffect["weather_type_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
-				statEffectIndex++
+		// Add Vietnamese translations
+		// Get the corresponding translated text from the position in statEffectTexts
+		// that matches the original position in statEffects array
+		if hasDesc && statEffectIndex < len(translatedFields.StatEffectTexts) {
+			// Add the translated description
+			translatedDesc := translatedFields.StatEffectTexts[statEffectIndex]
+			if translatedDesc != "" {
+				translatedEffect["description_vi"] = SanitizeUTF8(translatedDesc)
+				logTranslation("Translated effect %d: %s", statEffectIndex+1, truncateString(translatedDesc, 50))
 			}
-		} else if effectType == "player" {
-			if statEffectIndex < len(translatedFields.StatEffectTexts) {
-				translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
-				statEffectIndex++
+			statEffectIndex++
+		}
+
+		// Also handle weather_type if present
+		if _, hasWeather := effect["weather_type"].(string); hasWeather {
+			// For weather_type, we add it as a separate entry in StatEffectTexts
+			// So we need to find the right index - it should be after all descriptions
+			weatherIndex := len(statEffects) + statEffectIndex
+			if weatherIndex < len(translatedFields.StatEffectTexts) {
+				translatedEffect["weather_type_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[weatherIndex])
+				logTranslation("Translated weather type %d: %s", statEffectIndex+1,
+					truncateString(translatedFields.StatEffectTexts[weatherIndex], 50))
 			}
+			statEffectIndex++
 		}
 
 		statEffectsVi = append(statEffectsVi, translatedEffect)
