@@ -16,25 +16,16 @@ import (
 
 // TranslationFields represents the fields from a fish that need translation
 type TranslationFields struct {
-	Name            string `json:"name"`
-	Description     string `json:"description"`
-	Color           string `json:"color"`
-	Diet            string `json:"diet"`
-	Habitat         string `json:"habitat,omitempty"`
-	FavoriteWeather string `json:"favorite_weather"`
-	ExistenceReason string `json:"existence_reason"`
-	Effect          string `json:"effect,omitempty"`        // Keeping for backward compatibility
-	PlayerEffect    string `json:"player_effect,omitempty"` // Keeping for backward compatibility
-
-	// New fields for stat effects
-	StatEffects []StatEffectTranslation `json:"stat_effects,omitempty"`
-}
-
-// StatEffectTranslation represents an individual stat effect that needs translation
-type StatEffectTranslation struct {
-	ID          string `json:"id"`          // Identifier for the effect (used for mapping)
-	EffectType  string `json:"effect_type"` // Type of effect (environment, player, etc.)
-	Description string `json:"description"` // Description to translate
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Color           string   `json:"color"`
+	Diet            string   `json:"diet"`
+	Habitat         string   `json:"habitat"`
+	FavoriteWeather string   `json:"favorite_weather"`
+	ExistenceReason string   `json:"existence_reason"`
+	Effect          string   `json:"effect"`
+	PlayerEffect    string   `json:"player_effect"`
+	StatEffectTexts []string `json:"stat_effect_texts"`
 }
 
 // TranslatedFish contains both original fish ID and translated content
@@ -148,38 +139,11 @@ func (t *TranslatorClient) TranslateFish(ctx context.Context, fields Translation
 
 // buildTranslationPrompt creates a prompt for the Gemini API to translate fish content
 func (t *TranslatorClient) buildTranslationPrompt(fields TranslationFields) string {
-	// Build stat effects section if we have any
-	statEffectsPrompt := ""
-	if len(fields.StatEffects) > 0 {
-		statEffectsPrompt = "Stat Effects (translate each effect's description individually):\n"
-		for i, effect := range fields.StatEffects {
-			statEffectsPrompt += fmt.Sprintf("- Effect %d (ID: %s, Type: %s): %s\n",
-				i+1, effect.ID, effect.EffectType, effect.Description)
-		}
-	} else if fields.Effect != "" || fields.PlayerEffect != "" {
-		// Include legacy effect fields if no stat effects are provided
-		statEffectsPrompt = "Effects:\n"
-		if fields.Effect != "" {
-			statEffectsPrompt += fmt.Sprintf("- Environment Effect: %s\n", fields.Effect)
-		}
-		if fields.PlayerEffect != "" {
-			statEffectsPrompt += fmt.Sprintf("- Player Effect: %s\n", fields.PlayerEffect)
-		}
-	}
-
-	// Format instruction about the array
-	statEffectsInstruction := ""
-	if len(fields.StatEffects) > 0 {
-		statEffectsInstruction = `
-IMPORTANT: For the "stat_effects" array, you MUST translate each effect description individually while keeping the same ID. 
-Each effect object needs both an "id" field and a "description" field. Do not merge or combine effects.`
-	}
-
-	return fmt.Sprintf(`
+	prompt := fmt.Sprintf(`
 You are a professional translator specializing in Vietnamese translations for a fish-themed game.
 Please translate the following fish description fields from English to Vietnamese.
 Maintain the tone and style, but adapt cultural references as needed for Vietnamese speakers.
-Format your response as a valid JSON object containing only the translated fields.%s
+Format your response as a valid JSON object containing only the translated fields.
 
 Original fields:
 - Name: %s
@@ -189,8 +153,23 @@ Original fields:
 - Habitat: %s
 - Favorite Weather: %s
 - Existence Reason: %s
-%s
+- Effect: %s
+- Player Effect: %s
+`, fields.Name, fields.Description, fields.Color, fields.Diet,
+		fields.Habitat, fields.FavoriteWeather, fields.ExistenceReason,
+		fields.Effect, fields.PlayerEffect)
 
+	// Add each stat effect for translation if available
+	if len(fields.StatEffectTexts) > 0 {
+		prompt += "\nStat Effects:\n"
+		for i, effectText := range fields.StatEffectTexts {
+			if effectText != "" {
+				prompt += fmt.Sprintf("- Effect_%d: %s\n", i+1, effectText)
+			}
+		}
+	}
+
+	prompt += `
 Return only a JSON object with the translated fields in this exact format:
 {
   "name": "[Vietnamese translation]",
@@ -200,42 +179,22 @@ Return only a JSON object with the translated fields in this exact format:
   "habitat": "[Vietnamese translation]",
   "favorite_weather": "[Vietnamese translation]",
   "existence_reason": "[Vietnamese translation]",
-  %s
-}
+  "effect": "[Vietnamese translation]",
+  "player_effect": "[Vietnamese translation]"
+`
 
-Make sure all Vietnamese translations are in properly encoded UTF-8 and maintain appropriate diacritical marks.
-`, statEffectsInstruction, fields.Name, fields.Description, fields.Color, fields.Diet,
-		fields.Habitat, fields.FavoriteWeather, fields.ExistenceReason,
-		statEffectsPrompt,
-		t.buildStatEffectsResponseTemplate(fields.StatEffects))
-}
-
-// buildStatEffectsResponseTemplate creates the template part of the prompt for stat effects
-func (t *TranslatorClient) buildStatEffectsResponseTemplate(effects []StatEffectTranslation) string {
-	if len(effects) > 0 {
-		template := "\"stat_effects\": [\n"
-		for i, effect := range effects {
-			template += fmt.Sprintf("    {\"id\": \"%s\", \"description\": \"[Vietnamese translation of: %s]\"}",
-				effect.ID, truncateForTemplate(effect.Description, 30))
-			if i < len(effects)-1 {
-				template += ","
+	// Add stat effect fields to the expected JSON response
+	if len(fields.StatEffectTexts) > 0 {
+		for i := range fields.StatEffectTexts {
+			if fields.StatEffectTexts[i] != "" {
+				prompt += fmt.Sprintf(",\n  \"stat_effect_%d\": \"[Vietnamese translation]\"", i+1)
 			}
-			template += "\n"
 		}
-		template += "  ]"
-		return template
-	} else {
-		// Backward compatibility
-		return "\"effect\": \"[Vietnamese translation]\",\n  \"player_effect\": \"[Vietnamese translation]\""
 	}
-}
 
-// truncateForTemplate truncates a string to a reasonable length for the template
-func truncateForTemplate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	prompt += "\n}"
+
+	return prompt
 }
 
 // SanitizeUTF8 ensures that all strings are valid UTF-8 before storing in MongoDB
@@ -383,108 +342,77 @@ func SanitizeUTF8(s string) string {
 	return sanitized
 }
 
+// extractString safely extracts a string value from a map with a default fallback
+func (t *TranslatorClient) extractString(data map[string]interface{}, key string, defaultValue string) string {
+	if value, ok := data[key]; ok {
+		if strValue, ok := value.(string); ok {
+			return strValue
+		}
+	}
+	return defaultValue
+}
+
 // parseTranslationResponse extracts the JSON data from the Gemini response
 func (t *TranslatorClient) parseTranslationResponse(response string) (*TranslationFields, error) {
 	// Ensure response is valid UTF-8 first
 	response = SanitizeUTF8(response)
 
-	// Log the raw response for debugging
-	log.Printf("Raw translation response: %s", response)
-
-	// Extract JSON content from the response
-	jsonStart := strings.Index(response, "{")
-	jsonEnd := strings.LastIndex(response, "}")
-
-	if jsonStart == -1 || jsonEnd == -1 || jsonEnd <= jsonStart {
-		return nil, fmt.Errorf("could not find valid JSON in response: %s", response)
+	// Extract JSON object from response (handling potential text before/after JSON)
+	startIndex := strings.Index(response, "{")
+	endIndex := strings.LastIndex(response, "}")
+	if startIndex == -1 || endIndex == -1 || endIndex <= startIndex {
+		return nil, fmt.Errorf("no valid JSON found in response")
 	}
 
-	jsonContent := response[jsonStart : jsonEnd+1]
+	jsonStr := response[startIndex : endIndex+1]
 
-	// Fix common JSON format errors that might be in the model's response
-	// Replace single quotes with double quotes (models sometimes use single quotes)
-	jsonContent = strings.ReplaceAll(jsonContent, "'", "\"")
-
-	// Fix trailing commas in arrays and objects
-	jsonContent = strings.ReplaceAll(jsonContent, ",\n  ]", "\n  ]")
-	jsonContent = strings.ReplaceAll(jsonContent, ",\n}", "\n}")
-
-	// Parse the JSON into a map first for more flexible handling
-	var responseMap map[string]interface{}
-	if err := json.Unmarshal([]byte(jsonContent), &responseMap); err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	// Parse the JSON content
+	var result map[string]interface{}
+	err := json.Unmarshal([]byte(jsonStr), &result)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing JSON response: %w", err)
 	}
 
-	// Create a TranslationFields object to populate
+	// Extract the translated fields with safe fallbacks
 	translatedFields := &TranslationFields{
-		StatEffects: []StatEffectTranslation{},
+		Name:            t.extractString(result, "name", ""),
+		Description:     t.extractString(result, "description", ""),
+		Color:           t.extractString(result, "color", ""),
+		Diet:            t.extractString(result, "diet", ""),
+		Habitat:         t.extractString(result, "habitat", ""),
+		FavoriteWeather: t.extractString(result, "favorite_weather", ""),
+		ExistenceReason: t.extractString(result, "existence_reason", ""),
+		Effect:          t.extractString(result, "effect", ""),
+		PlayerEffect:    t.extractString(result, "player_effect", ""),
+		StatEffectTexts: []string{},
 	}
 
-	// Extract simple string fields
-	if name, ok := responseMap["name"].(string); ok {
-		translatedFields.Name = SanitizeUTF8(name)
-	}
-	if desc, ok := responseMap["description"].(string); ok {
-		translatedFields.Description = SanitizeUTF8(desc)
-	}
-	if color, ok := responseMap["color"].(string); ok {
-		translatedFields.Color = SanitizeUTF8(color)
-	}
-	if diet, ok := responseMap["diet"].(string); ok {
-		translatedFields.Diet = SanitizeUTF8(diet)
-	}
-	if habitat, ok := responseMap["habitat"].(string); ok {
-		translatedFields.Habitat = SanitizeUTF8(habitat)
-	}
-	if weather, ok := responseMap["favorite_weather"].(string); ok {
-		translatedFields.FavoriteWeather = SanitizeUTF8(weather)
-	}
-	if reason, ok := responseMap["existence_reason"].(string); ok {
-		translatedFields.ExistenceReason = SanitizeUTF8(reason)
-	}
-
-	// Extract legacy fields (for backward compatibility)
-	if effect, ok := responseMap["effect"].(string); ok {
-		translatedFields.Effect = SanitizeUTF8(effect)
-	}
-	if playerEffect, ok := responseMap["player_effect"].(string); ok {
-		translatedFields.PlayerEffect = SanitizeUTF8(playerEffect)
-	}
-
-	// Handle stat_effects array if present
-	if statEffectsRaw, ok := responseMap["stat_effects"]; ok {
-		if statEffects, ok := statEffectsRaw.([]interface{}); ok {
-			// Process each effect in the array
-			for _, effectRaw := range statEffects {
-				if effect, ok := effectRaw.(map[string]interface{}); ok {
-					effectTrans := StatEffectTranslation{}
-
-					// Extract ID
-					if id, ok := effect["id"].(string); ok {
-						effectTrans.ID = id
-					}
-
-					// Extract effect type if provided
-					if effectType, ok := effect["effect_type"].(string); ok {
-						effectTrans.EffectType = effectType
-					}
-
-					// Extract description
-					if desc, ok := effect["description"].(string); ok {
-						effectTrans.Description = SanitizeUTF8(desc)
-					}
-
-					// Add to our list of translated effects
-					translatedFields.StatEffects = append(translatedFields.StatEffects, effectTrans)
-				}
-			}
-
-			log.Printf("Successfully parsed %d translated stat effects", len(translatedFields.StatEffects))
+	// Extract any stat effect fields from the response
+	statEffects := make([]string, 0)
+	for i := 1; ; i++ {
+		key := fmt.Sprintf("stat_effect_%d", i)
+		if val, ok := result[key].(string); ok && val != "" {
+			statEffects = append(statEffects, val)
 		} else {
-			log.Printf("stat_effects field was not an array, type: %T", statEffectsRaw)
+			break // Stop when we don't find the next index
 		}
-	} else {
-		log.Printf("No stat_effects field found in translation response")
+	}
+	translatedFields.StatEffectTexts = statEffects
+
+	// Sanitize all fields to ensure valid UTF-8
+	translatedFields.Name = SanitizeUTF8(translatedFields.Name)
+	translatedFields.Description = SanitizeUTF8(translatedFields.Description)
+	translatedFields.Color = SanitizeUTF8(translatedFields.Color)
+	translatedFields.Diet = SanitizeUTF8(translatedFields.Diet)
+	translatedFields.Habitat = SanitizeUTF8(translatedFields.Habitat)
+	translatedFields.FavoriteWeather = SanitizeUTF8(translatedFields.FavoriteWeather)
+	translatedFields.ExistenceReason = SanitizeUTF8(translatedFields.ExistenceReason)
+	translatedFields.Effect = SanitizeUTF8(translatedFields.Effect)
+	translatedFields.PlayerEffect = SanitizeUTF8(translatedFields.PlayerEffect)
+
+	// Sanitize stat effects
+	for i, effect := range translatedFields.StatEffectTexts {
+		translatedFields.StatEffectTexts[i] = SanitizeUTF8(effect)
 	}
 
 	return translatedFields, nil

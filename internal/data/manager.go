@@ -1675,6 +1675,47 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	// Start translation
 	logTranslation("Translating fish: %s", extractStringFieldSafely(fishToTranslate, "name", "Unnamed Fish"))
 
+	// Extract stat effects for structured translation
+	var statEffects []map[string]interface{}
+	if statEffectsInterface, ok := fishToTranslate["stat_effects"].([]interface{}); ok {
+		for _, effectInterface := range statEffectsInterface {
+			if effect, ok := effectInterface.(map[string]interface{}); ok {
+				sanitizedEffect := make(map[string]interface{})
+				for k, v := range effect {
+					if strValue, ok := v.(string); ok {
+						sanitizedEffect[k] = SanitizeUTF8(strValue)
+					} else {
+						sanitizedEffect[k] = v
+					}
+				}
+				statEffects = append(statEffects, sanitizedEffect)
+			}
+		}
+	}
+
+	// Prepare text for each stat effect to be translated
+	statEffectTexts := make([]string, 0, len(statEffects))
+	statEffectTypes := make([]string, 0, len(statEffects))
+
+	for _, effect := range statEffects {
+		effectType, _ := effect["effect_type"].(string)
+		statEffectTypes = append(statEffectTypes, effectType)
+
+		if description, ok := effect["description"].(string); ok {
+			statEffectTexts = append(statEffectTexts, description)
+		} else {
+			statEffectTexts = append(statEffectTexts, "")
+		}
+
+		// Include weather_type or other special fields based on effect type
+		if effectType == "environment" {
+			if weatherType, ok := effect["weather_type"].(string); ok {
+				statEffectTexts = append(statEffectTexts, weatherType)
+				statEffectTypes = append(statEffectTypes, "weather_type")
+			}
+		}
+	}
+
 	// Extract fields to translate - add defensive extraction with defaults
 	fieldsToTranslate := TranslationFields{
 		Name:            extractStringFieldSafely(fishToTranslate, "name", "Unnamed Fish"),
@@ -1684,52 +1725,9 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		Habitat:         extractStringFieldSafely(fishToTranslate, "habitat", "Unknown habitat"),
 		FavoriteWeather: extractStringFieldSafely(fishToTranslate, "favorite_weather", "Unknown weather"),
 		ExistenceReason: extractStringFieldSafely(fishToTranslate, "existence_reason", "Unknown reason"),
-		StatEffects:     []StatEffectTranslation{}, // Initialize empty slice
-	}
-
-	// Extract stat effects for translation with more careful handling
-	if statEffectsInterface, ok := fishToTranslate["stat_effects"]; ok && statEffectsInterface != nil {
-		if statEffects, ok := statEffectsInterface.([]interface{}); ok && len(statEffects) > 0 {
-			logTranslation("Found %d stat effects to translate", len(statEffects))
-
-			// Process each effect individually
-			for idx, effectInterface := range statEffects {
-				if effect, ok := effectInterface.(map[string]interface{}); ok {
-					effectType, _ := effect["effect_type"].(string)
-					effectID := fmt.Sprintf("effect_%d", idx)
-
-					// Extract the description for this effect
-					var description string
-					if desc, ok := effect["description"].(string); ok {
-						description = SanitizeUTF8(desc)
-					} else {
-						// If no description, create a generic one based on effect type
-						if effectType == "environment" {
-							description = "Environmental effect on fishing conditions"
-						} else if effectType == "player" {
-							description = "Effect on player abilities"
-						} else {
-							description = "Special effect on gameplay"
-						}
-					}
-
-					// Create a translation request for this effect
-					effectTranslation := StatEffectTranslation{
-						ID:          effectID,
-						EffectType:  effectType,
-						Description: description,
-					}
-
-					// Add to the list of effects to translate
-					fieldsToTranslate.StatEffects = append(fieldsToTranslate.StatEffects, effectTranslation)
-					logTranslation("Added effect %s (%s) for translation", effectID, effectType)
-				}
-			}
-		} else {
-			logTranslation("No valid stat effects found or array is empty")
-		}
-	} else {
-		logTranslation("No stat_effects field found in fish data")
+		Effect:          "",
+		PlayerEffect:    "Affects player abilities",
+		StatEffectTexts: statEffectTexts,
 	}
 
 	// Set the cooldown before translation to prevent multiple translations at once
@@ -1751,6 +1749,13 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	fieldsToTranslate.Habitat = SanitizeUTF8(fieldsToTranslate.Habitat)
 	fieldsToTranslate.FavoriteWeather = SanitizeUTF8(fieldsToTranslate.FavoriteWeather)
 	fieldsToTranslate.ExistenceReason = SanitizeUTF8(fieldsToTranslate.ExistenceReason)
+	fieldsToTranslate.Effect = SanitizeUTF8(fieldsToTranslate.Effect)
+	fieldsToTranslate.PlayerEffect = SanitizeUTF8(fieldsToTranslate.PlayerEffect)
+
+	// Sanitize all stat effect texts
+	for i, text := range fieldsToTranslate.StatEffectTexts {
+		fieldsToTranslate.StatEffectTexts[i] = SanitizeUTF8(text)
+	}
 
 	// Translate the fish
 	translatedFields, err := m.translatorClient.TranslateFish(ctx, fieldsToTranslate)
@@ -1786,55 +1791,48 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		translatedFish["habitat_vi"] = SanitizeUTF8(translatedFields.Habitat)
 	}
 
-	// Handle stat effects with extra care
-	if statEffectsInterface, ok := fishToTranslate["stat_effects"]; ok && statEffectsInterface != nil {
-		if statEffects, ok := statEffectsInterface.([]interface{}); ok {
-			translatedStatEffects := make([]map[string]interface{}, 0, len(statEffects))
+	// Create a new stat_effects_vi array with translations
+	statEffectsVi := make([]map[string]interface{}, 0, len(statEffects))
+	statEffectIndex := 0
 
-			// Create a map of effect ID to translated description for easy lookup
-			effectTranslations := make(map[string]string)
-			for _, effect := range translatedFields.StatEffects {
-				effectTranslations[effect.ID] = effect.Description
-			}
+	// Process translated stat effects
+	for _, effect := range statEffects {
+		effectType, _ := effect["effect_type"].(string)
 
-			// Process each stat effect
-			for idx, effectInterface := range statEffects {
-				if effect, ok := effectInterface.(map[string]interface{}); ok {
-					// Create a new clean effect map that includes original values + translations
-					translatedEffect := make(map[string]interface{})
-
-					// Copy ALL original fields first
-					for field, val := range effect {
-						translatedEffect[field] = val
-					}
-
-					// Generate effect ID that matches the one used during translation
-					effectID := fmt.Sprintf("effect_%d", idx)
-
-					// Add the translated description if we have one
-					if translatedDesc, ok := effectTranslations[effectID]; ok {
-						translatedEffect["description_vi"] = SanitizeUTF8(translatedDesc)
-						logTranslation("Added translated description for effect %s", effectID)
-					} else {
-						// Fallback: use legacy translation if available
-						effectType, _ := effect["effect_type"].(string)
-						if effectType == "environment" && translatedFields.Effect != "" {
-							translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.Effect)
-						} else if effectType == "player" && translatedFields.PlayerEffect != "" {
-							translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.PlayerEffect)
-						} else {
-							// Last resort fallback
-							translatedEffect["description_vi"] = "Hiệu ứng đặc biệt" // Generic "Special effect" in Vietnamese
-						}
-					}
-
-					translatedStatEffects = append(translatedStatEffects, translatedEffect)
-				}
-			}
-
-			translatedFish["stat_effects"] = translatedStatEffects
-			logTranslation("Saved %d translated stat effects", len(translatedStatEffects))
+		// Create a deep copy of the original effect
+		translatedEffect := make(map[string]interface{})
+		for k, v := range effect {
+			translatedEffect[k] = v
 		}
+
+		// Add Vietnamese translations based on effect type
+		if effectType == "environment" {
+			if statEffectIndex < len(translatedFields.StatEffectTexts) {
+				translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
+				statEffectIndex++
+			}
+
+			// Look for weather type translation
+			if statEffectIndex < len(translatedFields.StatEffectTexts) && statEffectTypes[statEffectIndex] == "weather_type" {
+				translatedEffect["weather_type_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
+				statEffectIndex++
+			}
+		} else if effectType == "player" {
+			if statEffectIndex < len(translatedFields.StatEffectTexts) {
+				translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.StatEffectTexts[statEffectIndex])
+				statEffectIndex++
+			}
+		}
+
+		statEffectsVi = append(statEffectsVi, translatedEffect)
+	}
+
+	// Save both the original and translated stat effects
+	if len(statEffects) > 0 {
+		translatedFish["stat_effects"] = statEffects
+	}
+	if len(statEffectsVi) > 0 {
+		translatedFish["stat_effects_vi"] = statEffectsVi
 	}
 
 	translatedFish["favorite_weather_vi"] = SanitizeUTF8(translatedFields.FavoriteWeather)
