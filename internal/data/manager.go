@@ -642,12 +642,82 @@ func (m *DataManager) findNewsInSameCategory(ctx context.Context, category strin
 	return nil, fmt.Errorf("no unused news found in category: %s", category)
 }
 
-// queueFishGenerationWithMergedNews queues fish generation with merged news context
+// truncateString safely truncates a string to the specified maximum length
+// Uses SanitizeUTF8 to ensure the string is valid UTF-8
+func truncateString(s string, maxLen int) string {
+	// First sanitize to handle any invalid UTF-8 characters
+	sanitized := SanitizeUTF8(s)
+
+	if len(sanitized) <= maxLen {
+		return sanitized
+	}
+	return sanitized[:maxLen-3] + "..."
+}
+
+// logMergedNewsHeadline logs a truncated and sanitized version of merged news headlines
+func logMergedNewsHeadline(headlines ...string) string {
+	const maxHeadlineLength = 15 // characters per headline in the merged display
+
+	result := ""
+	for i, headline := range headlines {
+		// Sanitize and truncate each headline
+		cleanHeadline := SanitizeUTF8(headline)
+		if len(cleanHeadline) > maxHeadlineLength {
+			cleanHeadline = cleanHeadline[:maxHeadlineLength] + "..."
+		}
+
+		// Add separator between headlines
+		if i > 0 {
+			result += " + "
+		}
+		result += cleanHeadline
+	}
+
+	// Final check to ensure result is valid UTF-8
+	return SanitizeUTF8(result)
+}
+
+// queueFishGenerationWithMergedNews queues a fish generation task using multiple news items
 func (m *DataManager) queueFishGenerationWithMergedNews(ctx context.Context, reason string, news1, news2 *NewsItem) {
+	// Store the merged news items for the next fish generation
+	m.mergedNewsItems = []*NewsItem{news1, news2}
+
+	// Create a category string for the queue reason
+	categories := make(map[string]bool)
+	if news1 != nil {
+		categories[news1.Category] = true
+	}
+	if news2 != nil {
+		categories[news2.Category] = true
+	}
+
+	// Build the category string
+	categoryStr := ""
+	for cat := range categories {
+		if categoryStr != "" {
+			categoryStr += "/"
+		}
+		categoryStr += cat
+	}
+
+	// Create a merged headline for logging
+	var headlines []string
+	if news1 != nil {
+		headlines = append(headlines, news1.Headline)
+	}
+	if news2 != nil {
+		headlines = append(headlines, news2.Headline)
+	}
+
+	// Use safer headline logging
+	mergedHeadline := logMergedNewsHeadline(headlines...)
+
+	queueReason := fmt.Sprintf("merged news [%s]: %s", categoryStr, mergedHeadline)
+
 	// Create a request and add it to the queue
 	req := GenerationRequest{
 		Ctx:     ctx,
-		Reason:  reason,
+		Reason:  SanitizeUTF8(queueReason),
 		AddedAt: time.Now(),
 	}
 
@@ -656,7 +726,7 @@ func (m *DataManager) queueFishGenerationWithMergedNews(ctx context.Context, rea
 	// Save the primary news item
 	m.lastNewsData = news1
 	// Also store the secondary news item (will be handled at generation time)
-	m.mergedNewsItems = append(m.mergedNewsItems, news2)
+	m.mergedNewsItems = []*NewsItem{news1, news2}
 	m.generationQueue = append(m.generationQueue, req)
 	m.mu.Unlock()
 
@@ -668,7 +738,8 @@ func (m *DataManager) queueFishGenerationWithMergedNews(ctx context.Context, rea
 		go m.processGenerationQueue()
 	}
 
-	logFish("Added to generation queue: %s (queue size: %d)", reason, len(m.generationQueue))
+	logFish("Added to generation queue: %s (queue size: %d)",
+		SanitizeUTF8(queueReason), len(m.generationQueue))
 }
 
 // generateFishFromData generates a fish using the current data context
@@ -1143,14 +1214,6 @@ func (m *DataManager) Stop() {
 	m.wg.Wait()
 
 	log.Println("Data Manager stopped")
-}
-
-// Helper function to truncate a string to a certain length
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
 }
 
 // GetCollectors returns all data collectors managed by this data manager

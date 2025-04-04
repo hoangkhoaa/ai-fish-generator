@@ -490,48 +490,104 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 		return fmt.Errorf("failed to ensure fish collection exists: %v", err)
 	}
 
-	// Convert fish to FishData type
+	// First, prepare the fish data with full sanitization
 	var fishData FishData
+	var usedArticles []map[string]interface{}
 
 	switch f := fish.(type) {
 	case FishData:
 		fishData = f
+		// Sanitize string fields
+		fishData.Name = data.SanitizeUTF8(fishData.Name)
+		fishData.Description = data.SanitizeUTF8(fishData.Description)
+		fishData.Rarity = data.SanitizeUTF8(fishData.Rarity)
+		fishData.Habitat = data.SanitizeUTF8(fishData.Habitat)
+		fishData.Diet = data.SanitizeUTF8(fishData.Diet)
+		fishData.Color = data.SanitizeUTF8(fishData.Color)
+		fishData.RegionID = data.SanitizeUTF8(fishData.RegionID)
+		fishData.DataSource = data.SanitizeUTF8(fishData.DataSource)
+		fishData.GenerationReason = data.SanitizeUTF8(fishData.GenerationReason)
+		fishData.FavoriteWeather = data.SanitizeUTF8(fishData.FavoriteWeather)
+		fishData.ExistenceReason = data.SanitizeUTF8(fishData.ExistenceReason)
+
+		// Sanitize UsedArticles deeply
+		for _, article := range fishData.UsedArticles {
+			sanitizedArticle := make(map[string]interface{})
+			for k, v := range article {
+				if strVal, ok := v.(string); ok {
+					sanitizedArticle[k] = data.SanitizeUTF8(strVal)
+				} else {
+					sanitizedArticle[k] = v
+				}
+			}
+			usedArticles = append(usedArticles, sanitizedArticle)
+		}
+		fishData.UsedArticles = usedArticles
+
 	case *FishData:
+		// Sanitize pointer to FishData
 		fishData = *f
+		// Sanitize string fields
+		fishData.Name = data.SanitizeUTF8(fishData.Name)
+		fishData.Description = data.SanitizeUTF8(fishData.Description)
+		fishData.Rarity = data.SanitizeUTF8(fishData.Rarity)
+		fishData.Habitat = data.SanitizeUTF8(fishData.Habitat)
+		fishData.Diet = data.SanitizeUTF8(fishData.Diet)
+		fishData.Color = data.SanitizeUTF8(fishData.Color)
+		fishData.RegionID = data.SanitizeUTF8(fishData.RegionID)
+		fishData.DataSource = data.SanitizeUTF8(fishData.DataSource)
+		fishData.GenerationReason = data.SanitizeUTF8(fishData.GenerationReason)
+		fishData.FavoriteWeather = data.SanitizeUTF8(fishData.FavoriteWeather)
+		fishData.ExistenceReason = data.SanitizeUTF8(fishData.ExistenceReason)
+
+		// Sanitize UsedArticles deeply
+		for _, article := range fishData.UsedArticles {
+			sanitizedArticle := make(map[string]interface{})
+			for k, v := range article {
+				if strVal, ok := v.(string); ok {
+					sanitizedArticle[k] = data.SanitizeUTF8(strVal)
+				} else {
+					sanitizedArticle[k] = v
+				}
+			}
+			usedArticles = append(usedArticles, sanitizedArticle)
+		}
+		fishData.UsedArticles = usedArticles
+
 	case map[string]interface{}:
-		// Extract fields from map
+		// Extract fields from map with sanitization
 		if name, ok := f["name"].(string); ok {
-			fishData.Name = name
+			fishData.Name = data.SanitizeUTF8(name)
 		}
 		if desc, ok := f["description"].(string); ok {
-			fishData.Description = desc
+			fishData.Description = data.SanitizeUTF8(desc)
 		}
 		if rarity, ok := f["rarity"].(string); ok {
-			fishData.Rarity = rarity
+			fishData.Rarity = data.SanitizeUTF8(rarity)
 		}
 		if habitat, ok := f["habitat"].(string); ok {
-			fishData.Habitat = habitat
+			fishData.Habitat = data.SanitizeUTF8(habitat)
 		}
 		if diet, ok := f["diet"].(string); ok {
-			fishData.Diet = diet
+			fishData.Diet = data.SanitizeUTF8(diet)
 		}
 		if color, ok := f["color"].(string); ok {
-			fishData.Color = color
+			fishData.Color = data.SanitizeUTF8(color)
 		}
 		if regionID, ok := f["region_id"].(string); ok {
-			fishData.RegionID = regionID
+			fishData.RegionID = data.SanitizeUTF8(regionID)
 		}
 		if dataSource, ok := f["data_source"].(string); ok {
-			fishData.DataSource = dataSource
+			fishData.DataSource = data.SanitizeUTF8(dataSource)
 		}
 		if genReason, ok := f["generation_reason"].(string); ok {
-			fishData.GenerationReason = genReason
+			fishData.GenerationReason = data.SanitizeUTF8(genReason)
 		}
 		if favWeather, ok := f["favorite_weather"].(string); ok {
-			fishData.FavoriteWeather = favWeather
+			fishData.FavoriteWeather = data.SanitizeUTF8(favWeather)
 		}
 		if existReason, ok := f["existence_reason"].(string); ok {
-			fishData.ExistenceReason = existReason
+			fishData.ExistenceReason = data.SanitizeUTF8(existReason)
 		}
 
 		// Numeric fields
@@ -557,12 +613,37 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 
 		// Complex fields
 		if effects, ok := f["stat_effects"].([]map[string]interface{}); ok {
-			fishData.StatEffects = effects
+			// Sanitize stat effects
+			sanitizedEffects := make([]map[string]interface{}, 0, len(effects))
+			for _, effect := range effects {
+				sanitizedEffect := make(map[string]interface{})
+				for k, v := range effect {
+					if strVal, ok := v.(string); ok {
+						sanitizedEffect[k] = data.SanitizeUTF8(strVal)
+					} else {
+						sanitizedEffect[k] = v
+					}
+				}
+				sanitizedEffects = append(sanitizedEffects, sanitizedEffect)
+			}
+			fishData.StatEffects = sanitizedEffects
 		}
 
-		// Add handling for used articles
+		// Deep sanitization for used articles
 		if articles, ok := f["used_articles"].([]map[string]interface{}); ok {
-			fishData.UsedArticles = articles
+			sanitizedArticles := make([]map[string]interface{}, 0, len(articles))
+			for _, article := range articles {
+				sanitizedArticle := make(map[string]interface{})
+				for k, v := range article {
+					if strVal, ok := v.(string); ok {
+						sanitizedArticle[k] = data.SanitizeUTF8(strVal)
+					} else {
+						sanitizedArticle[k] = v
+					}
+				}
+				sanitizedArticles = append(sanitizedArticles, sanitizedArticle)
+			}
+			fishData.UsedArticles = sanitizedArticles
 		}
 	default:
 		// Try to convert from a fish type that implements required methods
@@ -584,24 +665,36 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 			return fmt.Errorf("invalid fish type")
 		}
 
-		// This is a rough conversion - we'd need to adjust for the actual structure
+		// Sanitize all string values during conversion
 		var statEffects []map[string]interface{}
 		if se, ok := info.GetStatEffects().([]map[string]interface{}); ok {
-			statEffects = se
+			sanitizedEffects := make([]map[string]interface{}, 0, len(se))
+			for _, effect := range se {
+				sanitizedEffect := make(map[string]interface{})
+				for k, v := range effect {
+					if strVal, ok := v.(string); ok {
+						sanitizedEffect[k] = data.SanitizeUTF8(strVal)
+					} else {
+						sanitizedEffect[k] = v
+					}
+				}
+				sanitizedEffects = append(sanitizedEffects, sanitizedEffect)
+			}
+			statEffects = sanitizedEffects
 		}
 
 		fishData = FishData{
-			Name:          info.GetName(),
-			Description:   info.GetDescription(),
-			Rarity:        info.GetRarity(),
+			Name:          data.SanitizeUTF8(info.GetName()),
+			Description:   data.SanitizeUTF8(info.GetDescription()),
+			Rarity:        data.SanitizeUTF8(info.GetRarity()),
 			Length:        info.GetLength(),
 			Weight:        info.GetWeight(),
-			Color:         info.GetColor(),
-			Habitat:       info.GetHabitat(),
-			Diet:          info.GetDiet(),
+			Color:         data.SanitizeUTF8(info.GetColor()),
+			Habitat:       data.SanitizeUTF8(info.GetHabitat()),
+			Diet:          data.SanitizeUTF8(info.GetDiet()),
 			GeneratedAt:   time.Now(),
 			IsAIGenerated: info.IsAIGenerated(),
-			DataSource:    info.GetDataSource(),
+			DataSource:    data.SanitizeUTF8(info.GetDataSource()),
 			StatEffects:   statEffects,
 		}
 	}
@@ -609,6 +702,22 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 	// Set generation time if not already set
 	if fishData.GeneratedAt.IsZero() {
 		fishData.GeneratedAt = time.Now()
+	}
+
+	// Perform one final validation pass on all fields
+	fishMap, err := bson.Marshal(fishData)
+	if err != nil {
+		log.Printf("Warning: Error marshaling fish data for validation: %v", err)
+		// Continue anyway, but log the error
+	} else {
+		// Unmarshal back to intermediate format we can validate
+		var rawData bson.M
+		if err := bson.Unmarshal(fishMap, &rawData); err != nil {
+			log.Printf("Warning: Error unmarshaling fish data for validation: %v", err)
+		} else {
+			// Validate all strings to ensure they're UTF-8 compliant
+			validateDeepMap(rawData)
+		}
 	}
 
 	// Insert document
@@ -625,6 +734,36 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 
 	log.Printf("Fish data saved: %s (ID: %s)", fishData.Name, result.InsertedID.(primitive.ObjectID).Hex())
 	return nil
+}
+
+// validateDeepMap recursively sanitizes all string values in a map
+func validateDeepMap(m bson.M) {
+	for key, value := range m {
+		switch v := value.(type) {
+		case string:
+			// Validate and sanitize the string if needed
+			if !utf8.ValidString(v) {
+				sanitized := data.SanitizeUTF8(v)
+				m[key] = sanitized
+				log.Printf("Sanitized invalid UTF-8 in field '%s' during fish save", key)
+			}
+		case []interface{}:
+			// Recursively validate arrays
+			for i, item := range v {
+				if itemMap, ok := item.(bson.M); ok {
+					validateDeepMap(itemMap)
+				} else if itemStr, ok := item.(string); ok {
+					if !utf8.ValidString(itemStr) {
+						v[i] = data.SanitizeUTF8(itemStr)
+						log.Printf("Sanitized invalid UTF-8 in array field '%s[%d]' during fish save", key, i)
+					}
+				}
+			}
+		case bson.M:
+			// Recursively validate nested maps
+			validateDeepMap(v)
+		}
+	}
 }
 
 // GetRecentWeatherData retrieves recent weather data for a specific region
