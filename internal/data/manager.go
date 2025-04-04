@@ -233,36 +233,58 @@ func (m *DataManager) Start(ctx context.Context) {
 
 		// Add a ticker for checking for fish to translate
 		var translationTicker *time.Ticker
-		if m.settings.EnableTranslation {
+		if m.settings.EnableTranslation && m.translatorClient != nil {
 			translationTicker = time.NewTicker(30 * time.Second)
 			defer translationTicker.Stop()
 		}
 
 		for {
-			select {
-			case <-weatherTicker.C:
-				// Collect weather for all regions
-				for _, region := range m.regions {
-					m.collectWeatherDataForRegion(baseCtx, region)
-				}
+			// Use different select statements based on whether translation is enabled
+			if translationTicker != nil {
+				select {
+				case <-weatherTicker.C:
+					// Collect weather for all regions
+					for _, region := range m.regions {
+						m.collectWeatherDataForRegion(baseCtx, region)
+					}
 
-			case <-priceTicker.C:
-				// Collect price data
-				m.collectPriceData(baseCtx)
+				case <-priceTicker.C:
+					// Collect price data
+					m.collectPriceData(baseCtx)
 
-			case <-newsTicker.C:
-				// Collect news data
-				m.collectNewsData(baseCtx)
+				case <-newsTicker.C:
+					// Collect news data
+					m.collectNewsData(baseCtx)
 
-			case <-translationTicker.C:
-				// Check for fish to translate if enabled
-				if m.settings.EnableTranslation {
+				case <-translationTicker.C:
+					// Check for fish to translate
 					m.checkForFishToTranslate(baseCtx)
-				}
 
-			case <-baseCtx.Done():
-				log.Println("Data collection goroutine stopped")
-				return
+				case <-baseCtx.Done():
+					log.Println("Data collection goroutine stopped")
+					return
+				}
+			} else {
+				// Version without translation ticker
+				select {
+				case <-weatherTicker.C:
+					// Collect weather for all regions
+					for _, region := range m.regions {
+						m.collectWeatherDataForRegion(baseCtx, region)
+					}
+
+				case <-priceTicker.C:
+					// Collect price data
+					m.collectPriceData(baseCtx)
+
+				case <-newsTicker.C:
+					// Collect news data
+					m.collectNewsData(baseCtx)
+
+				case <-baseCtx.Done():
+					log.Println("Data collection goroutine stopped")
+					return
+				}
 			}
 		}
 	}()
@@ -1525,6 +1547,12 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	m.mu.Lock()
 	m.lastTranslation = currentTime
 	m.mu.Unlock()
+
+	// Double safety check before translation
+	if m.translatorClient == nil {
+		logError("Translation client became nil after check, aborting translation")
+		return
+	}
 
 	// Translate the fish
 	translatedFields, err := m.translatorClient.TranslateFish(ctx, fieldsToTranslate)
