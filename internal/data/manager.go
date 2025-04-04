@@ -487,6 +487,17 @@ func (m *DataManager) collectNewsData(ctx context.Context) error {
 				continue
 			}
 
+			// Sanitize the headline and content to ensure valid UTF-8
+			newsItem.Headline = SanitizeUTF8(newsItem.Headline)
+			newsItem.Content = SanitizeUTF8(newsItem.Content)
+
+			// Sanitize keywords if they exist
+			if len(newsItem.Keywords) > 0 {
+				for i, keyword := range newsItem.Keywords {
+					newsItem.Keywords[i] = SanitizeUTF8(keyword)
+				}
+			}
+
 			// Check if we already have this exact news item before saving
 			newsID := newsItem.Source + ":" + newsItem.Headline
 			if m.usedNewsIDs[newsID] {
@@ -524,6 +535,18 @@ func (m *DataManager) collectNewsData(ctx context.Context) error {
 	case NewsItem:
 		// Handle single news item (backward compatibility)
 		newsData := value
+
+		// Sanitize the headline and content
+		newsData.Headline = SanitizeUTF8(newsData.Headline)
+		newsData.Content = SanitizeUTF8(newsData.Content)
+
+		// Sanitize keywords if they exist
+		if len(newsData.Keywords) > 0 {
+			for i, keyword := range newsData.Keywords {
+				newsData.Keywords[i] = SanitizeUTF8(keyword)
+			}
+		}
+
 		err = m.db.SaveNewsData(ctx, &newsData)
 		if err != nil {
 			logError("Error saving news data: %v", err)
@@ -543,6 +566,18 @@ func (m *DataManager) collectNewsData(ctx context.Context) error {
 		}
 
 		newsData := *value
+
+		// Sanitize the headline and content
+		value.Headline = SanitizeUTF8(value.Headline)
+		value.Content = SanitizeUTF8(value.Content)
+
+		// Sanitize keywords if they exist
+		if len(value.Keywords) > 0 {
+			for i, keyword := range value.Keywords {
+				value.Keywords[i] = SanitizeUTF8(keyword)
+			}
+		}
+
 		err = m.db.SaveNewsData(ctx, value)
 		if err != nil {
 			logError("Error saving news data: %v", err)

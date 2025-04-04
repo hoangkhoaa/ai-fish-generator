@@ -175,6 +175,16 @@ Return only a JSON object with the translated fields in this exact format:
 // SanitizeUTF8 ensures that all strings are valid UTF-8 before storing in MongoDB
 // Export this function so it can be used by other packages
 func SanitizeUTF8(s string) string {
+	// Early return for empty strings
+	if s == "" {
+		return s
+	}
+
+	// Log if the string contains "MISSING" or special formatters for debugging
+	if strings.Contains(s, "MISSING") || strings.Contains(s, "%!") {
+		log.Printf("Found potentially problematic string: %s", s)
+	}
+
 	// Layer 1: Basic validation with replacement
 	sanitized := strings.ToValidUTF8(s, "\uFFFD")
 
@@ -214,10 +224,71 @@ func SanitizeUTF8(s string) string {
 
 		// Special symbols that might cause BSON issues
 		"\uFFFD": "", // Replace replacement character with nothing
+
+		// Special formatting/encoding issues
+		"%!S(MISSING)": "%", // Fix for broken %S format specifier
+		"%!s(MISSING)": "%", // Fix for broken %s format specifier
+		"%!d(MISSING)": "%", // Fix for broken %d format specifier
+		"%!v(MISSING)": "%", // Fix for broken %v format specifier
+		"%!f(MISSING)": "%", // Fix for broken %f format specifier
+		"%!(MISSING)":  "%", // Generic fix for broken % format specifier
+		"%%":           "%", // Double percent sign
 	}
 
 	for char, replacement := range problematicReplacements {
 		sanitized = strings.ReplaceAll(sanitized, char, replacement)
+	}
+
+	// Layer 2.5: Fix common formatting artifacts from headlines
+	// This regex-like approach handles cases where we have formatting artifacts
+	sanitized = strings.ReplaceAll(sanitized, "%!S", "%")
+	sanitized = strings.ReplaceAll(sanitized, "%!s", "%")
+	sanitized = strings.ReplaceAll(sanitized, "%!d", "%")
+	sanitized = strings.ReplaceAll(sanitized, "%!v", "%")
+	sanitized = strings.ReplaceAll(sanitized, "%!f", "%")
+	sanitized = strings.ReplaceAll(sanitized, "(MISSING)", "")
+
+	// Layer 2.6: Handle specific patterns that might appear in news headlines with numbers
+	// Look for patterns like "2,230%!S(MISSING)urge" and fix them
+	// This is especially important for financial news articles with percentages
+
+	// First pass: fix percent formatting issues
+	if strings.Contains(sanitized, "%!") {
+		// Find all instances where we have digits followed by '%!'
+		// Typical pattern: "2,230%!S(MISSING)urge" should become "2,230% Surge"
+		parts := strings.Split(sanitized, "%!")
+		if len(parts) > 1 {
+			// The first part will be before the '%!'
+			result := parts[0] + "%"
+
+			for i := 1; i < len(parts); i++ {
+				part := parts[i]
+
+				// Check if this part starts with a format specifier pattern
+				if len(part) > 0 && strings.ContainsAny(string(part[0]), "SsdvfF") {
+					// If it starts with a format specifier, take the rest of the string
+					if len(part) > 1 {
+						// Skip the format specifier character and any "MISSING" or parentheses
+						idx := 1
+						// Skip past (MISSING) if present
+						if strings.HasPrefix(part[idx:], "(MISSING)") {
+							idx += len("(MISSING)")
+						}
+						// Add a space if the next character is a letter (for readability)
+						if idx < len(part) && ((part[idx] >= 'a' && part[idx] <= 'z') || (part[idx] >= 'A' && part[idx] <= 'Z')) {
+							result += " " + part[idx:]
+						} else {
+							result += part[idx:]
+						}
+					}
+				} else {
+					// If it doesn't start with a format specifier, just concatenate as is
+					result += part
+				}
+			}
+
+			sanitized = result
+		}
 	}
 
 	// Layer 3: Final validation to ensure we have valid UTF-8
@@ -236,7 +307,14 @@ func SanitizeUTF8(s string) string {
 	}
 
 	// Remove any leading/trailing whitespace that might have been introduced
-	return strings.TrimSpace(sanitized)
+	sanitized = strings.TrimSpace(sanitized)
+
+	// If the string was modified, log the change for debugging
+	if sanitized != s {
+		log.Printf("String sanitized: '%s' -> '%s'", s, sanitized)
+	}
+
+	return sanitized
 }
 
 // parseTranslationResponse extracts the JSON data from the Gemini response
