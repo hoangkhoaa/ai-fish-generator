@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Add colored logging constants at the top of the file
@@ -1517,29 +1518,63 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	// Get the first untranslated fish
 	fishToTranslate := untranslatedFish[0]
 
+	// Pre-validate all string fields to ensure valid UTF-8
+	// This helps identify problematic fields before we try to use them
+	for key, value := range fishToTranslate {
+		if strValue, ok := value.(string); ok {
+			if !utf8.ValidString(strValue) {
+				logError("Found invalid UTF-8 in field '%s', attempting to fix", key)
+				fishToTranslate[key] = SanitizeUTF8(strValue)
+			}
+		}
+	}
+
 	// Start translation
 	logTranslation("Translating fish: %s", fishToTranslate["name"])
 
-	// Extract fields to translate
+	// Extract fields to translate - add defensive extraction with defaults
 	fieldsToTranslate := TranslationFields{
-		Name:            fishToTranslate["name"].(string),
-		Description:     fishToTranslate["description"].(string),
-		Color:           fishToTranslate["color"].(string),
-		Diet:            fishToTranslate["diet"].(string),
-		Habitat:         fishToTranslate["habitat"].(string),
-		FavoriteWeather: fishToTranslate["favorite_weather"].(string),
-		ExistenceReason: fishToTranslate["existence_reason"].(string),
+		Name:            extractStringFieldSafely(fishToTranslate, "name", "Unnamed Fish"),
+		Description:     extractStringFieldSafely(fishToTranslate, "description", "No description available"),
+		Color:           extractStringFieldSafely(fishToTranslate, "color", "Unknown color"),
+		Diet:            extractStringFieldSafely(fishToTranslate, "diet", "Unknown diet"),
+		Habitat:         extractStringFieldSafely(fishToTranslate, "habitat", "Unknown habitat"),
+		FavoriteWeather: extractStringFieldSafely(fishToTranslate, "favorite_weather", "Unknown weather"),
+		ExistenceReason: extractStringFieldSafely(fishToTranslate, "existence_reason", "Unknown reason"),
+		Effect:          "",
+		PlayerEffect:    "Affects player abilities",
 	}
 
-	// Extract stat effects for translation
-	statEffects := fishToTranslate["stat_effects"].([]interface{})
-	for _, effectInterface := range statEffects {
-		effect := effectInterface.(map[string]interface{})
-		if effect["effect_type"] == "environment" {
-			fieldsToTranslate.Effect = effect["description"].(string)
-			fieldsToTranslate.FavoriteWeather = effect["weather_type"].(string)
-		} else if effect["effect_type"] == "player" {
-			fieldsToTranslate.PlayerEffect = effect["description"].(string)
+	// Extract stat effects for translation with more careful handling
+	if statEffectsInterface, ok := fishToTranslate["stat_effects"]; ok && statEffectsInterface != nil {
+		if statEffects, ok := statEffectsInterface.([]interface{}); ok && len(statEffects) > 0 {
+			for _, effectInterface := range statEffects {
+				if effect, ok := effectInterface.(map[string]interface{}); ok {
+					effectType, _ := effect["effect_type"].(string)
+					if effectType == "environment" {
+						description, ok := effect["description"].(string)
+						if ok && utf8.ValidString(description) {
+							fieldsToTranslate.Effect = description
+						} else if ok {
+							fieldsToTranslate.Effect = SanitizeUTF8(description)
+						}
+
+						weatherType, ok := effect["weather_type"].(string)
+						if ok && utf8.ValidString(weatherType) {
+							fieldsToTranslate.FavoriteWeather = weatherType
+						} else if ok {
+							fieldsToTranslate.FavoriteWeather = SanitizeUTF8(weatherType)
+						}
+					} else if effectType == "player" {
+						description, ok := effect["description"].(string)
+						if ok && utf8.ValidString(description) {
+							fieldsToTranslate.PlayerEffect = description
+						} else if ok {
+							fieldsToTranslate.PlayerEffect = SanitizeUTF8(description)
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -1561,13 +1596,20 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		return
 	}
 
-	// Create a copy of the original fish with translated fields
-	translatedFish := map[string]interface{}{}
-	for k, v := range fishToTranslate {
-		translatedFish[k] = v
+	// Create a new map for the translation instead of modifying the original
+	translatedFish := make(map[string]interface{})
+
+	// Only copy essential fields that we know are safe
+	safeFields := []string{"_id", "name", "description", "rarity", "length", "weight",
+		"region_id", "data_source", "generated_at", "is_ai_generated", "generation_reason"}
+
+	for _, field := range safeFields {
+		if val, ok := fishToTranslate[field]; ok {
+			translatedFish[field] = val
+		}
 	}
 
-	// Set translated fields
+	// Explicitly set translated fields as new fields with _vi suffix
 	translatedFish["name_vi"] = translatedFields.Name
 	translatedFish["description_vi"] = translatedFields.Description
 	translatedFish["color_vi"] = translatedFields.Color
@@ -1581,29 +1623,41 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		translatedFish["habitat_vi"] = translatedFields.Habitat
 	}
 
-	// Update stat effects with translations
-	translatedStatEffects := make([]map[string]interface{}, len(statEffects))
-	for i, effectInterface := range statEffects {
-		effect := effectInterface.(map[string]interface{})
-		translatedEffect := map[string]interface{}{}
+	// Handle stat effects with extra care
+	if statEffectsInterface, ok := fishToTranslate["stat_effects"]; ok && statEffectsInterface != nil {
+		if statEffects, ok := statEffectsInterface.([]interface{}); ok {
+			translatedStatEffects := make([]map[string]interface{}, 0, len(statEffects))
 
-		// Copy all fields
-		for k, v := range effect {
-			translatedEffect[k] = v
+			for _, effectInterface := range statEffects {
+				if effect, ok := effectInterface.(map[string]interface{}); ok {
+					// Create a new clean effect map
+					translatedEffect := make(map[string]interface{})
+
+					// Copy only essential fields we know are safe
+					safeEffectFields := []string{"effect_type", "modifier", "stat", "value"}
+					for _, field := range safeEffectFields {
+						if val, ok := effect[field]; ok {
+							translatedEffect[field] = val
+						}
+					}
+
+					// Add translated fields
+					effectType, _ := effect["effect_type"].(string)
+					if effectType == "environment" {
+						translatedEffect["description_vi"] = translatedFields.Effect
+						translatedEffect["weather_type_vi"] = translatedFields.FavoriteWeather
+					} else if effectType == "player" {
+						translatedEffect["description_vi"] = translatedFields.PlayerEffect
+					}
+
+					translatedStatEffects = append(translatedStatEffects, translatedEffect)
+				}
+			}
+
+			translatedFish["stat_effects"] = translatedStatEffects
 		}
-
-		// Add translated fields
-		if effect["effect_type"] == "environment" {
-			translatedEffect["description_vi"] = translatedFields.Effect
-			translatedEffect["weather_type_vi"] = translatedFields.FavoriteWeather
-		} else if effect["effect_type"] == "player" {
-			translatedEffect["description_vi"] = translatedFields.PlayerEffect
-		}
-
-		translatedStatEffects[i] = translatedEffect
 	}
 
-	translatedFish["stat_effects"] = translatedStatEffects
 	translatedFish["favorite_weather_vi"] = translatedFields.FavoriteWeather
 
 	// Save the translated fish back to the database
@@ -1615,4 +1669,18 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	}
 
 	logTranslation("Successfully translated fish '%s' to Vietnamese", fishToTranslate["name"])
+}
+
+// Helper function to safely extract string fields with a default value
+func extractStringFieldSafely(data map[string]interface{}, field string, defaultValue string) string {
+	if value, ok := data[field]; ok && value != nil {
+		if strValue, ok := value.(string); ok {
+			if utf8.ValidString(strValue) {
+				return strValue
+			}
+			// If not valid UTF-8, sanitize it
+			return SanitizeUTF8(strValue)
+		}
+	}
+	return defaultValue
 }

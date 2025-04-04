@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
@@ -174,8 +175,68 @@ Return only a JSON object with the translated fields in this exact format:
 // SanitizeUTF8 ensures that all strings are valid UTF-8 before storing in MongoDB
 // Export this function so it can be used by other packages
 func SanitizeUTF8(s string) string {
-	// Replace invalid UTF-8 sequences with the Unicode replacement character (U+FFFD)
-	return strings.ToValidUTF8(s, "\uFFFD")
+	// Layer 1: Basic validation with replacement
+	sanitized := strings.ToValidUTF8(s, "\uFFFD")
+
+	// Layer 2: Handle specific problematic characters
+	// Replace common problematic characters that might cause BSON issues
+	problematicReplacements := map[string]string{
+		// Common control characters that might cause issues
+		"\u0000": "", // NULL
+		"\u0001": "", // START OF HEADING
+		"\u0002": "", // START OF TEXT
+		"\u0003": "", // END OF TEXT
+		"\u0004": "", // END OF TRANSMISSION
+		"\u0005": "", // ENQUIRY
+		"\u0006": "", // ACKNOWLEDGE
+		"\u0007": "", // BELL
+		"\u0008": "", // BACKSPACE
+		"\u000B": "", // VERTICAL TAB
+		"\u000C": "", // FORM FEED
+		"\u000E": "", // SHIFT OUT
+		"\u000F": "", // SHIFT IN
+		"\u0010": "", // DATA LINK ESCAPE
+		"\u0011": "", // DEVICE CONTROL 1
+		"\u0012": "", // DEVICE CONTROL 2
+		"\u0013": "", // DEVICE CONTROL 3
+		"\u0014": "", // DEVICE CONTROL 4
+		"\u0015": "", // NEGATIVE ACKNOWLEDGE
+		"\u0016": "", // SYNCHRONOUS IDLE
+		"\u0017": "", // END OF TRANSMISSION BLOCK
+		"\u0018": "", // CANCEL
+		"\u0019": "", // END OF MEDIUM
+		"\u001A": "", // SUBSTITUTE
+		"\u001B": "", // ESCAPE
+		"\u001C": "", // INFORMATION SEPARATOR FOUR
+		"\u001D": "", // INFORMATION SEPARATOR THREE
+		"\u001E": "", // INFORMATION SEPARATOR TWO
+		"\u001F": "", // INFORMATION SEPARATOR ONE
+
+		// Special symbols that might cause BSON issues
+		"\uFFFD": "", // Replace replacement character with nothing
+	}
+
+	for char, replacement := range problematicReplacements {
+		sanitized = strings.ReplaceAll(sanitized, char, replacement)
+	}
+
+	// Layer 3: Final validation to ensure we have valid UTF-8
+	if !utf8.ValidString(sanitized) {
+		// If we still have invalid UTF-8, replace all non-ASCII characters with spaces
+		// This is a last resort that ensures we'll have valid data
+		result := ""
+		for _, r := range sanitized {
+			if r < 128 && r >= 32 { // ASCII printable range
+				result += string(r)
+			} else {
+				result += " " // Replace with space
+			}
+		}
+		return result
+	}
+
+	// Remove any leading/trailing whitespace that might have been introduced
+	return strings.TrimSpace(sanitized)
 }
 
 // parseTranslationResponse extracts the JSON data from the Gemini response
