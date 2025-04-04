@@ -117,6 +117,8 @@ type DataManager struct {
 	// Generation queue for better cooldown management
 	generationQueue     []GenerationRequest
 	queueProcessRunning bool
+	// Add WaitGroup to track running goroutines
+	wg sync.WaitGroup
 }
 
 // NewDataManager creates a new data manager
@@ -167,6 +169,7 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		generationQueue:      make([]GenerationRequest, 0),
 		queueProcessRunning:  false,
 		mergedNewsItem:       nil, // Initialize to nil
+		wg:                   sync.WaitGroup{},
 	}
 }
 
@@ -178,14 +181,47 @@ func (m *DataManager) Start(ctx context.Context) {
 	// Immediately collect initial data from all sources
 	m.collectInitialData(baseCtx)
 
-	// Start the weather collectors for each region (every 1 hour)
-	m.startWeatherCollection(baseCtx)
+	// Use a single goroutine for all periodic tasks
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
 
-	// Start price collectors (every 6 hours)
-	m.startPriceCollection(baseCtx)
+		// Create tickers for each collection type
+		weatherTicker := time.NewTicker(m.settings.WeatherInterval)
+		priceTicker := time.NewTicker(m.settings.PriceInterval)
+		newsTicker := time.NewTicker(m.settings.NewsInterval)
 
-	// Start news collector
-	m.startNewsCollection(baseCtx)
+		defer weatherTicker.Stop()
+		defer priceTicker.Stop()
+		defer newsTicker.Stop()
+
+		for {
+			select {
+			case <-weatherTicker.C:
+				// Collect weather for all regions
+				for _, region := range m.regions {
+					m.collectWeatherDataForRegion(baseCtx, region)
+				}
+
+			case <-priceTicker.C:
+				// Collect price data
+				m.collectPriceData(baseCtx)
+
+			case <-newsTicker.C:
+				// Collect news data
+				m.collectNewsData(baseCtx)
+
+			case <-baseCtx.Done():
+				log.Println("Data collection goroutine stopped")
+				return
+			}
+		}
+	}()
+
+	// Start queue processor if any initialization data needs to be processed
+	if len(m.generationQueue) > 0 {
+		m.startQueueProcessor(baseCtx)
+	}
 
 	log.Println("Data Manager started successfully")
 }
@@ -240,41 +276,6 @@ func (m *DataManager) collectInitialData(ctx context.Context) {
 	log.Println("Initial data collection completed")
 }
 
-// startWeatherCollection starts weather data collection for all regions
-func (m *DataManager) startWeatherCollection(ctx context.Context) {
-	interval := m.settings.WeatherInterval
-	// No need to override with hardcoded values - use what was configured
-
-	log.Printf("Starting weather collection with interval %v", interval)
-
-	// For each region, start collecting weather data for each city in that region
-	for _, region := range m.regions {
-		// Create a new context for this region
-		regionCtx, cancel := context.WithCancel(ctx)
-		m.cancelFuncs = append(m.cancelFuncs, cancel)
-
-		regionID := region.ID
-
-		// Start goroutine to collect weather data periodically
-		go func(region Region) {
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-
-			// First collection already done in collectInitialData
-			// Just wait for the ticker now
-			for {
-				select {
-				case <-ticker.C:
-					m.collectWeatherDataForRegion(ctx, region)
-				case <-regionCtx.Done():
-					log.Printf("Weather collection for region %s stopped", regionID)
-					return
-				}
-			}
-		}(region)
-	}
-}
-
 // collectWeatherDataForRegion collects weather data for all cities in a region
 func (m *DataManager) collectWeatherDataForRegion(ctx context.Context, region Region) {
 	logWeather("Collecting weather data for region: %s", region.Name)
@@ -317,36 +318,6 @@ func (m *DataManager) collectWeatherDataForRegion(ctx context.Context, region Re
 
 	// Mark data as ready
 	m.dataReady = true
-}
-
-// startPriceCollection starts price data collection
-func (m *DataManager) startPriceCollection(ctx context.Context) {
-	interval := m.settings.PriceInterval
-	// No need to override with hardcoded values - use what was configured
-
-	log.Printf("Starting price collection with interval %v", interval)
-
-	// Create a new context for price collection
-	priceCtx, cancel := context.WithCancel(ctx)
-	m.cancelFuncs = append(m.cancelFuncs, cancel)
-
-	// Start goroutine to collect price data periodically
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// First collection already done in collectInitialData
-		// Just wait for the ticker now
-		for {
-			select {
-			case <-ticker.C:
-				m.collectPriceData(ctx)
-			case <-priceCtx.Done():
-				log.Println("Price collection stopped")
-				return
-			}
-		}
-	}()
 }
 
 // collectPriceData collects price data from all price sources
@@ -411,36 +382,6 @@ func (m *DataManager) collectPriceData(ctx context.Context) {
 
 	// Mark data as ready
 	m.dataReady = true
-}
-
-// startNewsCollection starts news data collection
-func (m *DataManager) startNewsCollection(ctx context.Context) {
-	interval := m.settings.NewsInterval
-	// No need to override with hardcoded values - use what was configured
-
-	log.Printf("Starting news collection with interval %v", interval)
-
-	// Create a new context for news collection
-	newsCtx, cancel := context.WithCancel(ctx)
-	m.cancelFuncs = append(m.cancelFuncs, cancel)
-
-	// Start goroutine to collect news data periodically
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-
-		// First collection already done in collectInitialData
-		// Just wait for the ticker now
-		for {
-			select {
-			case <-ticker.C:
-				m.collectNewsData(ctx)
-			case <-newsCtx.Done():
-				log.Println("News collection stopped")
-				return
-			}
-		}
-	}()
 }
 
 // collectNewsData collects news data
@@ -816,6 +757,35 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		// Create current time once to ensure consistent timestamps
 		timestamp := time.Now()
 
+		// Create a list of articles used to generate this fish
+		usedArticles := []map[string]interface{}{
+			{
+				"headline":  m.lastNewsData.Headline,
+				"source":    m.lastNewsData.Source,
+				"url":       m.lastNewsData.URL,
+				"category":  m.lastNewsData.Category,
+				"sentiment": m.lastNewsData.Sentiment,
+				"keywords":  m.lastNewsData.Keywords,
+				"published": m.lastNewsData.PublishedAt,
+				"used_at":   timestamp,
+			},
+		}
+
+		// Add the merged news item if it was used
+		if m.mergedNewsItem != nil {
+			usedArticles = append(usedArticles, map[string]interface{}{
+				"headline":  m.mergedNewsItem.Headline,
+				"source":    m.mergedNewsItem.Source,
+				"url":       m.mergedNewsItem.URL,
+				"category":  m.mergedNewsItem.Category,
+				"sentiment": m.mergedNewsItem.Sentiment,
+				"keywords":  m.mergedNewsItem.Keywords,
+				"published": m.mergedNewsItem.PublishedAt,
+				"used_at":   timestamp,
+				"is_merged": true,
+			})
+		}
+
 		// Create a structured fish data object that matches the MongoDB schema exactly
 		fish := map[string]interface{}{
 			"name":              fishData.Name,
@@ -834,6 +804,7 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 			"favorite_weather":  fishData.FavoriteWeather, // New field for catch mechanics
 			"catch_chance":      catchChance,              // New field for catch mechanics
 			"existence_reason":  fishData.ExistenceReason, // Why this fish exists
+			"used_articles":     usedArticles,             // Track which news articles were used
 			"stat_effects": []map[string]interface{}{
 				{
 					"effect_type":  "environment",
@@ -942,14 +913,16 @@ func (m *DataManager) GenerateFishFromContext(ctx context.Context, reason string
 // Stop stops all data collection
 func (m *DataManager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	for _, cancel := range m.cancelFuncs {
 		cancel()
 	}
-
 	// Clear cancel functions
 	m.cancelFuncs = make([]context.CancelFunc, 0)
+	m.mu.Unlock()
+
+	// Wait for all goroutines to complete
+	log.Println("Waiting for all data collection goroutines to complete...")
+	m.wg.Wait()
 
 	log.Println("Data Manager stopped")
 }
@@ -1029,25 +1002,21 @@ func (m *DataManager) queueFishGeneration(ctx context.Context, reason string) {
 
 	// Start the queue processor if it's not already running
 	if !m.queueProcessRunning {
-		go m.processGenerationQueue()
+		m.startQueueProcessor(ctx)
 	}
 }
 
 // processGenerationQueue processes the fish generation queue with proper timing
 func (m *DataManager) processGenerationQueue() {
-	m.mu.Lock()
-	if m.queueProcessRunning {
-		m.mu.Unlock()
-		return // Another processor is already running
-	}
-
-	m.queueProcessRunning = true
-	m.mu.Unlock()
-
 	defer func() {
 		m.mu.Lock()
 		m.queueProcessRunning = false
 		m.mu.Unlock()
+
+		// Recover from panics to prevent crashing the app
+		if r := recover(); r != nil {
+			logError("Recovered from panic in queue processor: %v", r)
+		}
 	}()
 
 	for {
@@ -1074,16 +1043,19 @@ func (m *DataManager) processGenerationQueue() {
 
 		if timeUntilReady > 0 {
 			// Need to wait for cooldown to expire
-			nextRequest := m.generationQueue[0]
-			waitTime := nextRequest.AddedAt.Sub(currentTime)
-			if waitTime > timeUntilReady {
-				waitTime = timeUntilReady
+			waitTime := timeUntilReady
+
+			// Ensure wait time is never negative
+			if waitTime < 0 {
+				waitTime = 0
 			}
 			m.mu.Unlock()
 
 			logFish("Waiting %v for cooldown before processing next request",
 				waitTime.Round(time.Second))
-			time.Sleep(waitTime)
+			if waitTime > 0 {
+				time.Sleep(waitTime)
+			}
 			continue
 		}
 
@@ -1124,15 +1096,21 @@ func (m *DataManager) processGenerationQueue() {
 
 // checkPendingNewsForGeneration checks for unused news in the same category and queues them for generation
 func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
+	// Use a separate context to prevent cancellation issues
+	safeCtx := context.Background()
+
 	// Cooldown must be over to process more news
 	currentTime := time.Now()
+	m.mu.Lock()
 	timeSinceLastGeneration := currentTime.Sub(m.lastFishGeneration)
 	if !m.lastFishGeneration.IsZero() && timeSinceLastGeneration < m.generationCooldown {
+		m.mu.Unlock()
 		return // Still on cooldown
 	}
+	m.mu.Unlock()
 
 	// Get recent news from database grouped by category to find pairs
-	recentNews, err := m.db.GetRecentNewsData(ctx, 30) // Check a good number of recent news
+	recentNews, err := m.db.GetRecentNewsData(safeCtx, 30) // Check a good number of recent news
 	if err != nil || len(recentNews) == 0 {
 		logNews("No recent news found, skipping fish generation")
 		return
@@ -1186,7 +1164,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 
 			// Create a request and add it to the queue
 			req := GenerationRequest{
-				Ctx:     ctx,
+				Ctx:     safeCtx,
 				Reason:  reason,
 				AddedAt: time.Now(),
 			}
@@ -1203,7 +1181,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 			m.usedNewsIDs[newsID2] = true
 
 			// Save to database in background
-			go m.savePersistentState(ctx)
+			go m.savePersistentState(safeCtx)
 
 			// Only process one pair at a time to prevent too many generations
 			foundPair = true
@@ -1227,7 +1205,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 
 				// Create a request and add it to the queue
 				req := GenerationRequest{
-					Ctx:     ctx,
+					Ctx:     safeCtx,
 					Reason:  reason,
 					AddedAt: time.Now(),
 				}
@@ -1241,7 +1219,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 				m.usedNewsIDs[newsID] = true
 
 				// Save to database in background
-				go m.savePersistentState(ctx)
+				go m.savePersistentState(safeCtx)
 				break
 			}
 		}
@@ -1286,6 +1264,7 @@ func (m *DataManager) savePersistentState(ctx context.Context) {
 		return
 	}
 
+	// Create a local copy of data to prevent race conditions
 	m.mu.Lock()
 	usedIDsCopy := make(map[string]bool)
 	for k, v := range m.usedNewsIDs {
@@ -1296,13 +1275,40 @@ func (m *DataManager) savePersistentState(ctx context.Context) {
 	copy(queueCopy, m.generationQueue)
 	m.mu.Unlock()
 
+	// Create a timeout context for database operations
+	saveCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	// Save used news IDs
-	if err := m.db.SaveUsedNewsIDs(ctx, usedIDsCopy); err != nil {
+	if err := m.db.SaveUsedNewsIDs(saveCtx, usedIDsCopy); err != nil {
 		logError("Failed to save used news IDs: %v", err)
 	}
 
 	// Save generation queue
-	if err := m.db.SaveGenerationQueue(ctx, queueCopy); err != nil {
+	if err := m.db.SaveGenerationQueue(saveCtx, queueCopy); err != nil {
 		logError("Failed to save generation queue: %v", err)
 	}
+}
+
+// startQueueProcessor starts the generation queue processor in a controlled manner
+func (m *DataManager) startQueueProcessor(ctx context.Context) {
+	m.mu.Lock()
+	if m.queueProcessRunning {
+		m.mu.Unlock()
+		return // Already running
+	}
+	m.queueProcessRunning = true
+	m.mu.Unlock()
+
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		defer func() {
+			m.mu.Lock()
+			m.queueProcessRunning = false
+			m.mu.Unlock()
+		}()
+
+		m.processGenerationQueue()
+	}()
 }
