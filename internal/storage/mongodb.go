@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -1284,6 +1285,43 @@ func (m *MongoDB) UpdateFishWithTranslation(ctx context.Context, fishID interfac
 
 	// Create the filter using the ID
 	filter := bson.M{"_id": objectID}
+
+	// Validate all string fields to ensure they are valid UTF-8
+	// This is a defensive measure to prevent BSON encoding errors
+	for key, value := range translatedFish {
+		// Skip non-string fields
+		if strValue, ok := value.(string); ok {
+			// If we find an invalid UTF-8 string, replace it with a valid one
+			if !utf8.ValidString(strValue) {
+				translatedFish[key] = strings.ToValidUTF8(strValue, "\uFFFD")
+				log.Printf("Fixed invalid UTF-8 in field: %s", key)
+			}
+		} else if mapValue, ok := value.(map[string]interface{}); ok {
+			// For nested maps, check each string value
+			for nestedKey, nestedValue := range mapValue {
+				if nestedStrValue, ok := nestedValue.(string); ok {
+					if !utf8.ValidString(nestedStrValue) {
+						mapValue[nestedKey] = strings.ToValidUTF8(nestedStrValue, "\uFFFD")
+						log.Printf("Fixed invalid UTF-8 in nested field: %s.%s", key, nestedKey)
+					}
+				}
+			}
+		} else if arrayValue, ok := value.([]interface{}); ok {
+			// For array values, check if they contain maps with strings
+			for i, item := range arrayValue {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					for itemKey, itemValue := range itemMap {
+						if itemStrValue, ok := itemValue.(string); ok {
+							if !utf8.ValidString(itemStrValue) {
+								itemMap[itemKey] = strings.ToValidUTF8(itemStrValue, "\uFFFD")
+								log.Printf("Fixed invalid UTF-8 in array field: %s[%d].%s", key, i, itemKey)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Define the update operation (replace the entire document)
 	update := bson.M{"$set": translatedFish}

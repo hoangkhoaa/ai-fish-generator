@@ -171,8 +171,18 @@ Return only a JSON object with the translated fields in this exact format:
 		fields.Effect, fields.PlayerEffect)
 }
 
+// SanitizeUTF8 ensures that all strings are valid UTF-8 before storing in MongoDB
+// Export this function so it can be used by other packages
+func SanitizeUTF8(s string) string {
+	// Replace invalid UTF-8 sequences with the Unicode replacement character (U+FFFD)
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
+
 // parseTranslationResponse extracts the JSON data from the Gemini response
 func (t *TranslatorClient) parseTranslationResponse(response string) (*TranslationFields, error) {
+	// Ensure response is valid UTF-8 first
+	response = SanitizeUTF8(response)
+
 	// Extract JSON content from the response
 	jsonStart := strings.Index(response, "{")
 	jsonEnd := strings.LastIndex(response, "}")
@@ -188,6 +198,17 @@ func (t *TranslatorClient) parseTranslationResponse(response string) (*Translati
 	if err := json.Unmarshal([]byte(jsonContent), &translatedFields); err != nil {
 		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
+
+	// Sanitize all fields to ensure valid UTF-8
+	translatedFields.Name = SanitizeUTF8(translatedFields.Name)
+	translatedFields.Description = SanitizeUTF8(translatedFields.Description)
+	translatedFields.Color = SanitizeUTF8(translatedFields.Color)
+	translatedFields.Diet = SanitizeUTF8(translatedFields.Diet)
+	translatedFields.Habitat = SanitizeUTF8(translatedFields.Habitat)
+	translatedFields.FavoriteWeather = SanitizeUTF8(translatedFields.FavoriteWeather)
+	translatedFields.ExistenceReason = SanitizeUTF8(translatedFields.ExistenceReason)
+	translatedFields.Effect = SanitizeUTF8(translatedFields.Effect)
+	translatedFields.PlayerEffect = SanitizeUTF8(translatedFields.PlayerEffect)
 
 	return &translatedFields, nil
 }
