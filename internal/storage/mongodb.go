@@ -430,7 +430,7 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// SaveNewsData saves or updates news data in MongoDB
+// SaveNewsData saves news data to MongoDB
 func (m *MongoDB) SaveNewsData(ctx context.Context, newsItem interface{}) error {
 	collection := m.client.Database(m.database).Collection(newsCollection)
 
@@ -473,8 +473,12 @@ func (m *MongoDB) SaveNewsData(ctx context.Context, newsItem interface{}) error 
 		newsData.Timestamp = time.Now()
 	}
 
-	// Create filter for upsert operation - keep one news item per source
-	filter := bson.M{"source": newsData.Source}
+	// Create filter for upsert operation - use composite key of source+headline
+	// This ensures we don't overwrite different news from the same source
+	filter := bson.M{
+		"source":   newsData.Source,
+		"headline": newsData.Headline,
+	}
 
 	// Set up upsert options
 	opts := options.FindOneAndReplace().SetUpsert(true).SetReturnDocument(options.After)
@@ -486,7 +490,7 @@ func (m *MongoDB) SaveNewsData(ctx context.Context, newsItem interface{}) error 
 		return fmt.Errorf("failed to upsert news data: %v", err)
 	}
 
-	log.Printf("News data updated from source '%s': '%s'",
+	log.Printf("News data saved from source '%s': '%s'",
 		newsData.Source, truncateString(newsData.Headline, 50))
 	return nil
 }

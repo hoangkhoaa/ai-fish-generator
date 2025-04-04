@@ -81,7 +81,7 @@ type DatabaseClient interface {
 type CollectionSettings struct {
 	WeatherInterval    time.Duration // 1 hour in production
 	PriceInterval      time.Duration // 6 hours in production
-	NewsInterval       time.Duration // 12 hours in production
+	NewsInterval       time.Duration // 20 minutes in production
 	TestMode           bool
 	GeminiApiKey       string        // API key for Gemini
 	GenerationCooldown time.Duration // Optional generation cooldown
@@ -135,7 +135,7 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		settings.PriceInterval = 6 * time.Hour // 6 hours default for prices
 	}
 	if settings.NewsInterval == 0 {
-		settings.NewsInterval = 12 * time.Hour // Keep 12 hours default for news
+		settings.NewsInterval = 20 * time.Minute // 20 minutes default for news
 	}
 
 	// Set generation cooldown based on test mode or settings
@@ -148,7 +148,7 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		generationCooldown = 10 * time.Second // 10 seconds in test mode
 	} else {
 		// Default production cooldown
-		generationCooldown = 15 * time.Minute // 15 minutes in production
+		generationCooldown = 25 * time.Minute // 25 minutes in production
 	}
 
 	return &DataManager{
@@ -396,28 +396,97 @@ func (m *DataManager) collectNewsData(ctx context.Context) error {
 		return fmt.Errorf("database client is nil")
 	}
 
-	// Try both value and pointer types
-	newsData, ok := newsEvent.Value.(NewsItem)
-	if !ok {
-		newsDataPtr, okPtr := newsEvent.Value.(*NewsItem)
-		if !okPtr {
-			logError("Invalid news data type")
-			return fmt.Errorf("invalid news data type")
+	logNews("Collected new batch of news articles from API")
+
+	// Handle batch of news items or single news item
+	switch value := newsEvent.Value.(type) {
+	case []*NewsItem:
+		// Process a batch of news items
+		if len(value) == 0 {
+			return fmt.Errorf("empty news batch returned")
 		}
-		newsData = *newsDataPtr
+
+		savedCount := 0
+		skippedCount := 0
+
+		// Save all news items to the database
+		for _, newsItem := range value {
+			if newsItem == nil {
+				continue
+			}
+
+			// Check if we already have this exact news item before saving
+			newsID := newsItem.Source + ":" + newsItem.Headline
+			if m.usedNewsIDs[newsID] {
+				skippedCount++
+				continue
+			}
+
+			err = m.db.SaveNewsData(ctx, newsItem)
+			if err != nil {
+				if strings.Contains(err.Error(), "duplicate key") {
+					// This is a duplicate, just count it as skipped
+					skippedCount++
+					continue
+				}
+
+				logError("Error saving news item '%s': %v",
+					truncateString(newsItem.Headline, 30), err)
+				// Continue with other items even if one fails
+				continue
+			}
+
+			savedCount++
+			logNews("Saved: '%s' (%.2f sentiment, %s)",
+				truncateString(newsItem.Headline, 50), newsItem.Sentiment, newsItem.Category)
+		}
+
+		logNews("Processed %d news items (%d saved, %d skipped)",
+			len(value), savedCount, skippedCount)
+
+		// Use the first item as the "latest" news for fish generation, if we saved any
+		if savedCount > 0 {
+			m.lastNewsData = value[0]
+		}
+
+	case NewsItem:
+		// Handle single news item (backward compatibility)
+		newsData := value
+		err = m.db.SaveNewsData(ctx, &newsData)
+		if err != nil {
+			logError("Error saving news data: %v", err)
+			return err
+		}
+
+		logNews("Data saved: '%s' (%.2f sentiment, category: %s)",
+			truncateString(newsData.Headline, 50), newsData.Sentiment, newsData.Category)
+
+		// Store the most recent news data
+		m.lastNewsData = &newsData
+
+	case *NewsItem:
+		// Handle pointer to single news item (backward compatibility)
+		if value == nil {
+			return fmt.Errorf("nil news item returned")
+		}
+
+		newsData := *value
+		err = m.db.SaveNewsData(ctx, value)
+		if err != nil {
+			logError("Error saving news data: %v", err)
+			return err
+		}
+
+		logNews("Data saved: '%s' (%.2f sentiment, category: %s)",
+			truncateString(newsData.Headline, 50), newsData.Sentiment, newsData.Category)
+
+		// Store the most recent news data
+		m.lastNewsData = value
+
+	default:
+		logError("Invalid news data type: %T", newsEvent.Value)
+		return fmt.Errorf("invalid news data type: %T", newsEvent.Value)
 	}
-
-	err = m.db.SaveNewsData(ctx, &newsData)
-	if err != nil {
-		logError("Error saving news data: %v", err)
-		return err
-	}
-
-	logNews("Data saved: '%s' (%.2f sentiment, category: %s)",
-		truncateString(newsData.Headline, 50), newsData.Sentiment, newsData.Category)
-
-	// Store the most recent news data
-	m.lastNewsData = &newsData
 
 	// Simply save the news and initiate queue processing if needed
 	// The queue processor will handle generating fish after cooldown
@@ -1110,7 +1179,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 
 	// Get recent news from database grouped by category to find pairs
 	m.mu.Unlock()
-	recentNews, err := m.db.GetRecentNewsData(safeCtx, 30) // Check a good number of recent news
+	recentNews, err := m.db.GetRecentNewsData(safeCtx, 50) // Check more news items to find matching categories
 	if err != nil || len(recentNews) == 0 {
 		logNews("No recent news found, skipping fish generation")
 		return
@@ -1145,7 +1214,62 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 		}
 	}
 
-	// Check each category for at least 2 unused news items
+	// Log the news category distribution
+	logNews("Found unused news articles in %d different categories", len(newsByCategory))
+	for category, items := range newsByCategory {
+		logNews("- Category '%s': %d unused articles", category, len(items))
+	}
+
+	// Find the category with the most unused articles and prioritize it
+	var bestCategory string
+	var maxArticles int
+	for category, items := range newsByCategory {
+		if len(items) >= 2 && len(items) > maxArticles {
+			maxArticles = len(items)
+			bestCategory = category
+		}
+	}
+
+	// If we found a category with multiple articles, use it
+	if bestCategory != "" && maxArticles >= 2 {
+		// Get the two most recent news items in this best category
+		news1 := newsByCategory[bestCategory][0]
+		news2 := newsByCategory[bestCategory][1]
+
+		// Create merged reason
+		reason := fmt.Sprintf("merged news [%s]: %s + %s",
+			bestCategory,
+			truncateString(news1.Headline, 20),
+			truncateString(news2.Headline, 20))
+
+		// Queue generation with these news items
+		logNews("Selected category '%s' with %d unused articles for themed fish generation",
+			bestCategory, maxArticles)
+
+		// Create a request and add it to the queue
+		req := GenerationRequest{
+			Ctx:     safeCtx,
+			Reason:  reason,
+			AddedAt: time.Now(),
+		}
+
+		// Store news for generation
+		m.lastNewsData = news1
+		m.mergedNewsItem = news2
+		m.generationQueue = append(m.generationQueue, req)
+
+		// Mark both as used
+		newsID1 := news1.Source + ":" + news1.Headline
+		newsID2 := news2.Source + ":" + news2.Headline
+		m.usedNewsIDs[newsID1] = true
+		m.usedNewsIDs[newsID2] = true
+
+		// Save to database in background
+		go m.savePersistentState(safeCtx)
+		return
+	}
+
+	// If we didn't find a best category with multiple articles, check each category for pairs
 	foundPair := false
 	for category, newsItems := range newsByCategory {
 		if len(newsItems) >= 2 {
@@ -1191,6 +1315,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 
 	// If no pairs found but we have at least one unused news item, use it individually
 	if !foundPair && !m.settings.TestMode { // In production mode, we can use single news items
+		logNews("No category pairs found, falling back to single news item")
 		for _, newsItems := range newsByCategory {
 			if len(newsItems) > 0 {
 				news := newsItems[0]
@@ -1201,7 +1326,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 					news.Category,
 					truncateString(news.Headline, 40))
 
-				logNews("No pairs found, using single news item: %s", truncateString(news.Headline, 40))
+				logNews("Using single news item: %s", truncateString(news.Headline, 40))
 
 				// Create a request and add it to the queue
 				req := GenerationRequest{

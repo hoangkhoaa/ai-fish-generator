@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math/rand"
 	"net/http"
 	"strings"
 	"time"
@@ -125,7 +124,7 @@ func (c *NewsCollector) Collect(ctx context.Context) (*DataEvent, error) {
 
 	// Construct API URL
 	url := fmt.Sprintf(
-		"https://newsapi.org/v2/top-headlines?category=%s&language=en&pageSize=10&apiKey=%s",
+		"https://newsapi.org/v2/top-headlines?category=%s&language=en&pageSize=30&apiKey=%s",
 		category, c.apiKey,
 	)
 
@@ -158,12 +157,9 @@ func (c *NewsCollector) Collect(ctx context.Context) (*DataEvent, error) {
 		return nil, fmt.Errorf("no news articles returned")
 	}
 
-	// Pick a random article that hasn't been used recently
-	maxAttempts := 10
-	for i := 0; i < maxAttempts; i++ {
-		index := rand.Intn(len(newsAPIResponse.Articles))
-		article := newsAPIResponse.Articles[index]
-
+	// Create a batch of processed news items
+	var newsItems []*NewsItem
+	for _, article := range newsAPIResponse.Articles {
 		// Skip if headline is empty or if we've used it recently
 		if article.Title == "" || c.lastHeadlines[article.Title] {
 			continue
@@ -171,19 +167,6 @@ func (c *NewsCollector) Collect(ctx context.Context) (*DataEvent, error) {
 
 		// Mark this headline as used
 		c.lastHeadlines[article.Title] = true
-
-		// Limit the size of the lastHeadlines map to avoid memory growth
-		if len(c.lastHeadlines) > 100 {
-			// Clear the oldest half of the entries
-			i := 0
-			for headline := range c.lastHeadlines {
-				if i > 50 {
-					break
-				}
-				delete(c.lastHeadlines, headline)
-				i++
-			}
-		}
 
 		// Calculate sentiment
 		sentiment := estimateSentiment(article.Title)
@@ -201,16 +184,34 @@ func (c *NewsCollector) Collect(ctx context.Context) (*DataEvent, error) {
 			Sentiment:   sentiment,
 		}
 
-		return &DataEvent{
-			Type:      NewsData,
-			Value:     newsItem,
-			Timestamp: time.Now(),
-			Source:    "newsapi-org",
-			Raw:       article,
-		}, nil
+		newsItems = append(newsItems, newsItem)
 	}
 
-	return nil, fmt.Errorf("could not find a new headline after %d attempts", maxAttempts)
+	// Limit the size of the lastHeadlines map to avoid memory growth
+	if len(c.lastHeadlines) > 100 {
+		// Clear the oldest half of the entries
+		i := 0
+		for headline := range c.lastHeadlines {
+			if i > 50 {
+				break
+			}
+			delete(c.lastHeadlines, headline)
+			i++
+		}
+	}
+
+	// If we couldn't find any new articles, return an error
+	if len(newsItems) == 0 {
+		return nil, fmt.Errorf("no new headlines found after processing")
+	}
+
+	return &DataEvent{
+		Type:      NewsData,
+		Value:     newsItems, // Return all news items as an array
+		Timestamp: time.Now(),
+		Source:    "newsapi-org",
+		Raw:       newsAPIResponse.Articles,
+	}, nil
 }
 
 // GetType returns the type of data collected
