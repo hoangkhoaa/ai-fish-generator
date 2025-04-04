@@ -2,8 +2,6 @@ module fish-generate
 
 go 1.23.0
 
-toolchain go1.24.1
-
 require (
 	github.com/google/generative-ai-go v0.19.0
 	github.com/gorilla/mux v1.8.1
