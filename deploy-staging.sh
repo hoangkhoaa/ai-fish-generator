@@ -23,11 +23,11 @@ fi
 
 # Verify required environment variables in .env
 echo "Checking required environment variables..."
-required_vars=("WEATHER_API_KEY" "NEWS_API_KEY" "METAL_PRICE_API_KEY" "GEMINI_API_KEY")
+required_vars=("GEMINI_API_KEY" "OPENWEATHER_API_KEY" "NEWSAPI_KEY" "METALPRICE_API_KEY")
 missing_vars=false
 
 for var in "${required_vars[@]}"; do
-  if ! grep -q "^${var}=" .env || grep -q "^${var}=$" .env || grep -q "^${var}=your_" .env; then
+  if ! grep -q "^${var}=" .env || grep -q "^${var}=$" .env; then
     echo "Missing or invalid ${var} in .env file"
     missing_vars=true
   fi
