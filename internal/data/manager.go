@@ -492,8 +492,20 @@ func (m *DataManager) collectNewsData(ctx context.Context) error {
 
 	// Simply save the news and initiate queue processing if needed
 	// The queue processor will handle generating fish after cooldown
+	m.mu.Lock()
 	if !m.queueProcessRunning {
-		go m.processGenerationQueue()
+		m.mu.Unlock()
+		// Try to find and process unused news items right away
+		go func() {
+			// Wait a short time to ensure all news items are saved
+			time.Sleep(2 * time.Second)
+			m.checkPendingNewsForGeneration(context.Background())
+
+			// Start the queue processor
+			m.startQueueProcessor(context.Background())
+		}()
+	} else {
+		m.mu.Unlock()
 	}
 
 	return nil
@@ -1131,7 +1143,7 @@ func (m *DataManager) processGenerationQueue() {
 		hasQueueItems := len(m.generationQueue) > 0
 		m.mu.Unlock()
 
-		// If queue is empty, try to find news to process but only if we're not on cooldown
+		// If queue is empty, try to find news to process
 		if !hasQueueItems {
 			// Check if we need to process any pending news items
 			m.checkPendingNewsForGeneration(context.Background())
@@ -1141,10 +1153,11 @@ func (m *DataManager) processGenerationQueue() {
 			hasQueueItems = len(m.generationQueue) > 0
 			m.mu.Unlock()
 
-			// If still no items, exit the processor
+			// If still no items, don't exit but wait and check again for new news items
 			if !hasQueueItems {
-				logFish("No generation requests found, stopping processor")
-				return
+				logFish("No generation requests found, waiting for 5 minutes before checking again")
+				time.Sleep(5 * time.Minute)
+				continue
 			}
 		}
 
