@@ -105,7 +105,8 @@ type DataManager struct {
 	lastGoldData    *GoldPrice
 	lastNewsData    *NewsItem
 	// For merged news generation
-	mergedNewsItem *NewsItem
+	mergedNewsItem  *NewsItem   // For backward compatibility
+	mergedNewsItems []*NewsItem // Store up to 2 additional news items
 	// Test mode tracking
 	initialDataCollected bool
 	dataReady            bool
@@ -169,6 +170,7 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		generationQueue:      make([]GenerationRequest, 0),
 		queueProcessRunning:  false,
 		mergedNewsItem:       nil, // Initialize to nil
+		mergedNewsItems:      make([]*NewsItem, 0),
 		wg:                   sync.WaitGroup{},
 	}
 }
@@ -537,7 +539,7 @@ func (m *DataManager) queueFishGenerationWithMergedNews(ctx context.Context, rea
 	// Save the primary news item
 	m.lastNewsData = news1
 	// Also store the secondary news item (will be handled at generation time)
-	m.mergedNewsItem = news2
+	m.mergedNewsItems = append(m.mergedNewsItems, news2)
 	m.generationQueue = append(m.generationQueue, req)
 	m.mu.Unlock()
 
@@ -575,14 +577,16 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 	var contextSummary []string
 	sourcesAvailable := 0
 
-	// Always add news data first
-	contextSummary = append(contextSummary, fmt.Sprintf("NEWS: \"%s\" (%.2f sentiment)",
-		m.lastNewsData.Headline, m.lastNewsData.Sentiment))
+	// Always add primary news data first
+	contextSummary = append(contextSummary, fmt.Sprintf("PRIMARY NEWS: \"%s\" (%.2f sentiment, %s)",
+		m.lastNewsData.Headline, m.lastNewsData.Sentiment, m.lastNewsData.Category))
 
-	// If we have merged news, add it to the context summary
-	if m.mergedNewsItem != nil {
-		contextSummary = append(contextSummary, fmt.Sprintf("MERGED NEWS: \"%s\" (%.2f sentiment)",
-			m.mergedNewsItem.Headline, m.mergedNewsItem.Sentiment))
+	// If we have merged news items, add them to the context summary
+	if len(m.mergedNewsItems) > 0 {
+		for i, mergedNews := range m.mergedNewsItems {
+			contextSummary = append(contextSummary, fmt.Sprintf("MERGED NEWS %d: \"%s\" (%.2f sentiment, %s)",
+				i+1, mergedNews.Headline, mergedNews.Sentiment, mergedNews.Category))
+		}
 	}
 
 	if m.lastWeatherData != nil {
@@ -652,9 +656,10 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		"news": m.lastNewsData,
 	}
 
-	// Add merged news if available
-	if m.mergedNewsItem != nil {
-		contextData["merged_news"] = m.mergedNewsItem
+	// Add merged news items if available
+	if len(m.mergedNewsItems) > 0 {
+		// Add array of merged news
+		contextData["merged_news"] = m.mergedNewsItems
 	}
 
 	if m.lastWeatherData != nil {
@@ -674,7 +679,8 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 	m.lastFishGeneration = currentTime
 
 	// Generate a unique fish using Gemini with all available context
-	logFish("Generating unique fish using %d data sources (Reason: %s)...", sourcesAvailable, reason)
+	logFish("Generating unique fish using %d data sources and %d news articles (Reason: %s)...",
+		sourcesAvailable, 1+len(m.mergedNewsItems), reason)
 	fishData, err := m.geminiClient.GenerateUniqueFishFromContext(fishCtx, contextData, reason)
 
 	if err != nil {
@@ -694,7 +700,8 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 	}
 
 	// Clear the merged news data to avoid reusing it
-	m.mergedNewsItem = nil
+	m.mergedNewsItems = nil
+	m.mergedNewsItem = nil // For backward compatibility
 
 	// Override AI-generated numerical values with more varied random values
 
@@ -840,16 +847,16 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 			},
 		}
 
-		// Add the merged news item if it was used
-		if m.mergedNewsItem != nil {
+		// Add the merged news items if they were used
+		for _, news := range m.mergedNewsItems {
 			usedArticles = append(usedArticles, map[string]interface{}{
-				"headline":  m.mergedNewsItem.Headline,
-				"source":    m.mergedNewsItem.Source,
-				"url":       m.mergedNewsItem.URL,
-				"category":  m.mergedNewsItem.Category,
-				"sentiment": m.mergedNewsItem.Sentiment,
-				"keywords":  m.mergedNewsItem.Keywords,
-				"published": m.mergedNewsItem.PublishedAt,
+				"headline":  news.Headline,
+				"source":    news.Source,
+				"url":       news.URL,
+				"category":  news.Category,
+				"sentiment": news.Sentiment,
+				"keywords":  news.Keywords,
+				"published": news.PublishedAt,
 				"used_at":   timestamp,
 				"is_merged": true,
 			})
@@ -1177,15 +1184,15 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 		return // Still on cooldown
 	}
 
-	// Get recent news from database grouped by category to find pairs
+	// Get recent news from database grouped by category to find related articles
 	m.mu.Unlock()
-	recentNews, err := m.db.GetRecentNewsData(safeCtx, 50) // Check more news items to find matching categories
+	recentNews, err := m.db.GetRecentNewsData(safeCtx, 100) // Check more news items to find matching categories
 	if err != nil || len(recentNews) == 0 {
 		logNews("No recent news found, skipping fish generation")
 		return
 	}
 
-	// Find pairs of unused news with the same category
+	// Find groups of unused news with the same category
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -1232,19 +1239,32 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 
 	// If we found a category with multiple articles, use it
 	if bestCategory != "" && maxArticles >= 2 {
-		// Get the two most recent news items in this best category
-		news1 := newsByCategory[bestCategory][0]
-		news2 := newsByCategory[bestCategory][1]
+		// Get up to 3 news items in this best category
+		newsItems := newsByCategory[bestCategory]
+		maxToUse := 3
+		if len(newsItems) < maxToUse {
+			maxToUse = len(newsItems)
+		}
 
-		// Create merged reason
-		reason := fmt.Sprintf("merged news [%s]: %s + %s",
+		selectedNews := newsItems[:maxToUse]
+
+		// Store all the news IDs we'll be using
+		var usedNewsIDs []string
+		var headlines []string
+		for _, news := range selectedNews {
+			newsID := news.Source + ":" + news.Headline
+			usedNewsIDs = append(usedNewsIDs, newsID)
+			headlines = append(headlines, truncateString(news.Headline, 20))
+		}
+
+		// Create merged reason with up to 3 headlines
+		reason := fmt.Sprintf("merged news [%s]: %s",
 			bestCategory,
-			truncateString(news1.Headline, 20),
-			truncateString(news2.Headline, 20))
+			strings.Join(headlines, " + "))
 
 		// Queue generation with these news items
-		logNews("Selected category '%s' with %d unused articles for themed fish generation",
-			bestCategory, maxArticles)
+		logNews("Selected category '%s' with %d articles for themed fish generation",
+			bestCategory, len(selectedNews))
 
 		// Create a request and add it to the queue
 		req := GenerationRequest{
@@ -1253,38 +1273,38 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 			AddedAt: time.Now(),
 		}
 
-		// Store news for generation
-		m.lastNewsData = news1
-		m.mergedNewsItem = news2
+		// Store primary news item
+		m.lastNewsData = selectedNews[0]
+
+		// Store secondary news items as an array in the mergedNewsItems field
+		m.mergedNewsItems = selectedNews[1:]
+
 		m.generationQueue = append(m.generationQueue, req)
 
-		// Mark both as used
-		newsID1 := news1.Source + ":" + news1.Headline
-		newsID2 := news2.Source + ":" + news2.Headline
-		m.usedNewsIDs[newsID1] = true
-		m.usedNewsIDs[newsID2] = true
+		// Mark all selected news items as used
+		for _, newsID := range usedNewsIDs {
+			m.usedNewsIDs[newsID] = true
+			logNews("Marked as used: %s", newsID)
+		}
 
 		// Save to database in background
 		go m.savePersistentState(safeCtx)
 		return
 	}
 
-	// If we didn't find a best category with multiple articles, check each category for pairs
-	foundPair := false
-	for category, newsItems := range newsByCategory {
-		if len(newsItems) >= 2 {
-			// Get the two most recent news items in this category
-			news1 := newsItems[0]
-			news2 := newsItems[1]
+	// If we didn't find a best category with multiple articles, fall back to single news item
+	logNews("No category with multiple articles found, falling back to single news item")
+	for _, newsItems := range newsByCategory {
+		if len(newsItems) > 0 {
+			news := newsItems[0]
+			newsID := news.Source + ":" + news.Headline
 
-			// Create merged reason
-			reason := fmt.Sprintf("merged news [%s]: %s + %s",
-				category,
-				truncateString(news1.Headline, 20),
-				truncateString(news2.Headline, 20))
+			// Queue generation with this individual news item
+			reason := fmt.Sprintf("news [%s]: %s",
+				news.Category,
+				truncateString(news.Headline, 40))
 
-			// Queue generation with these news items
-			logNews("Found unused pair in category '%s', queueing for fish generation", category)
+			logNews("Using single news item: %s", truncateString(news.Headline, 40))
 
 			// Create a request and add it to the queue
 			req := GenerationRequest{
@@ -1294,62 +1314,17 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 			}
 
 			// Store news for generation
-			m.lastNewsData = news1
-			m.mergedNewsItem = news2
+			m.lastNewsData = news
+			m.mergedNewsItems = nil
 			m.generationQueue = append(m.generationQueue, req)
 
-			// Mark both as used
-			newsID1 := news1.Source + ":" + news1.Headline
-			newsID2 := news2.Source + ":" + news2.Headline
-			m.usedNewsIDs[newsID1] = true
-			m.usedNewsIDs[newsID2] = true
+			// Mark as used
+			m.usedNewsIDs[newsID] = true
 
 			// Save to database in background
 			go m.savePersistentState(safeCtx)
-
-			// Only process one pair at a time to prevent too many generations
-			foundPair = true
 			break
 		}
-	}
-
-	// If no pairs found but we have at least one unused news item, use it individually
-	if !foundPair && !m.settings.TestMode { // In production mode, we can use single news items
-		logNews("No category pairs found, falling back to single news item")
-		for _, newsItems := range newsByCategory {
-			if len(newsItems) > 0 {
-				news := newsItems[0]
-				newsID := news.Source + ":" + news.Headline
-
-				// Queue generation with this individual news item
-				reason := fmt.Sprintf("news [%s]: %s",
-					news.Category,
-					truncateString(news.Headline, 40))
-
-				logNews("Using single news item: %s", truncateString(news.Headline, 40))
-
-				// Create a request and add it to the queue
-				req := GenerationRequest{
-					Ctx:     safeCtx,
-					Reason:  reason,
-					AddedAt: time.Now(),
-				}
-
-				// Store news for generation
-				m.lastNewsData = news
-				m.mergedNewsItem = nil
-				m.generationQueue = append(m.generationQueue, req)
-
-				// Mark as used
-				m.usedNewsIDs[newsID] = true
-
-				// Save to database in background
-				go m.savePersistentState(safeCtx)
-				break
-			}
-		}
-	} else if !foundPair {
-		logNews("No news pairs found, skipping generation until new news arrives")
 	}
 }
 

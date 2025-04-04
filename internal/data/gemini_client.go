@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/option"
@@ -445,238 +447,244 @@ func (c *GeminiClient) GenerateUniqueFishFromContext(ctx context.Context, contex
 	return fish, nil
 }
 
-// buildComprehensivePrompt creates a detailed prompt for the Gemini API with multiple data sources
+// buildComprehensivePrompt constructs the detailed prompt for Gemini based on the context data
 func (c *GeminiClient) buildComprehensivePrompt(contextData map[string]interface{}, reason string) string {
-	var newsHeadline, newsCategory, sentiment string
-	var mergedNewsHeadline, mergedNewsCategory, mergedNewsSentiment string
-	var weatherCondition, weatherDescription string
-	var temperature float64
-	var bitcoinPrice, bitcoinChange, goldPrice, goldChange float64
-	var hasMergedNews bool
+	// Variables to hold merged news data if available
+	var mergedNewsHeadlines []string
+	var mergedNewsCategories []string
+	var mergedNewsSentiments []float64
+	hasMergedNews := false
 
-	// Extract news data
-	if news, ok := contextData["news"]; ok {
-		if newsItem, ok := news.(*NewsItem); ok {
-			newsHeadline = newsItem.Headline
-			newsCategory = newsItem.Category
-
-			if newsItem.Sentiment > 0.3 {
-				sentiment = "positive"
-			} else if newsItem.Sentiment < -0.3 {
-				sentiment = "negative"
-			} else {
-				sentiment = "neutral"
-			}
-		}
-	}
-
-	// Extract merged news data if available
-	if mergedNews, ok := contextData["merged_news"]; ok {
+	// Check for merged news items
+	if mergedNews, ok := contextData["merged_news"].([]*NewsItem); ok && len(mergedNews) > 0 {
 		hasMergedNews = true
-		if newsItem, ok := mergedNews.(*NewsItem); ok {
-			mergedNewsHeadline = newsItem.Headline
-			mergedNewsCategory = newsItem.Category
 
-			if newsItem.Sentiment > 0.3 {
-				mergedNewsSentiment = "positive"
-			} else if newsItem.Sentiment < -0.3 {
-				mergedNewsSentiment = "negative"
-			} else {
-				mergedNewsSentiment = "neutral"
-			}
+		// Extract data from each merged news item
+		for _, news := range mergedNews {
+			mergedNewsHeadlines = append(mergedNewsHeadlines, news.Headline)
+			mergedNewsCategories = append(mergedNewsCategories, news.Category)
+			mergedNewsSentiments = append(mergedNewsSentiments, news.Sentiment)
 		}
+	} else if singleMergedNews, ok := contextData["merged_news"].(*NewsItem); ok && singleMergedNews != nil {
+		// Handle backward compatibility with single merged news
+		hasMergedNews = true
+		mergedNewsHeadlines = append(mergedNewsHeadlines, singleMergedNews.Headline)
+		mergedNewsCategories = append(mergedNewsCategories, singleMergedNews.Category)
+		mergedNewsSentiments = append(mergedNewsSentiments, singleMergedNews.Sentiment)
 	}
 
-	// Extract weather data
-	if weather, ok := contextData["weather"]; ok {
-		type WeatherGetter interface {
-			GetCondition() string
-			GetTempC() float64
-			GetDescription() string
-		}
+	// Extract primary news data
+	var newsHeadline string
+	var newsCategory string
+	var newsSentiment float64
 
-		if w, ok := weather.(WeatherGetter); ok {
-			weatherCondition = w.GetCondition()
-			temperature = w.GetTempC()
-			weatherDescription = w.GetDescription()
-		} else if w, ok := weather.(*struct {
-			Condition   string  `json:"condition"`
-			TempC       float64 `json:"temp_c"`
-			Description string  `json:"description"`
-		}); ok {
-			weatherCondition = w.Condition
-			temperature = w.TempC
-			weatherDescription = w.Description
-		}
+	if news, ok := contextData["news"].(*NewsItem); ok && news != nil {
+		newsHeadline = news.Headline
+		newsCategory = news.Category
+		newsSentiment = news.Sentiment
 	}
 
-	// Extract bitcoin data
-	if bitcoin, ok := contextData["bitcoin"]; ok {
-		type CryptoGetter interface {
-			GetPriceUSD() float64
-			GetChange24h() float64
-		}
+	// Build context description
+	contextDesc := c.buildContextDescriptionWithMergedNews(
+		contextData,
+		newsHeadline,
+		newsCategory,
+		newsSentiment,
+		mergedNewsHeadlines,
+		mergedNewsCategories,
+		mergedNewsSentiments,
+		hasMergedNews)
 
-		if btc, ok := bitcoin.(CryptoGetter); ok {
-			bitcoinPrice = btc.GetPriceUSD()
-			bitcoinChange = btc.GetChange24h()
-		} else if btc, ok := bitcoin.(*struct {
-			PriceUSD  float64 `json:"price_usd"`
-			Change24h float64 `json:"change_24h"`
-		}); ok {
-			bitcoinPrice = btc.PriceUSD
-			bitcoinChange = btc.Change24h
-		}
-	}
+	// Set up the prompt template
+	var prompt strings.Builder
 
-	// Extract gold data
-	if gold, ok := contextData["gold"]; ok {
-		type GoldGetter interface {
-			GetPriceUSD() float64
-			GetChange24h() float64
-		}
+	prompt.WriteString(fmt.Sprintf(`
+You are a creative AI that designs unique and imaginative fish species based on real-world contextual data.
 
-		if g, ok := gold.(GoldGetter); ok {
-			goldPrice = g.GetPriceUSD()
-			goldChange = g.GetChange24h()
-		} else if g, ok := gold.(*struct {
-			PriceUSD  float64 `json:"price_usd"`
-			Change24h float64 `json:"change_24h"`
-		}); ok {
-			goldPrice = g.PriceUSD
-			goldChange = g.Change24h
-		}
-	}
-
-	// Determine if context is economic-focused
-	isEconomicContext := false
-	if newsCategory == "business" || newsCategory == "economy" || newsCategory == "finance" ||
-		strings.Contains(strings.ToLower(newsHeadline), "econom") ||
-		strings.Contains(strings.ToLower(newsHeadline), "market") ||
-		strings.Contains(strings.ToLower(newsHeadline), "financ") ||
-		strings.Contains(strings.ToLower(newsHeadline), "stock") {
-		isEconomicContext = true
-	}
-
-	// Check merged news for economic context too
-	if hasMergedNews && (mergedNewsCategory == "business" || mergedNewsCategory == "economy" || mergedNewsCategory == "finance" ||
-		strings.Contains(strings.ToLower(mergedNewsHeadline), "econom") ||
-		strings.Contains(strings.ToLower(mergedNewsHeadline), "market") ||
-		strings.Contains(strings.ToLower(mergedNewsHeadline), "financ") ||
-		strings.Contains(strings.ToLower(mergedNewsHeadline), "stock")) {
-		isEconomicContext = true
-	}
-
-	// Build the context description, adding merged news if available
-	contextDescription := buildContextDescriptionWithMergedNews(
-		newsHeadline, newsCategory, sentiment,
-		mergedNewsHeadline, mergedNewsCategory, mergedNewsSentiment, hasMergedNews,
-		weatherCondition, weatherDescription, temperature,
-		bitcoinPrice, bitcoinChange, goldPrice, goldChange)
-
-	// Create the prompt template - UPDATED for efficiency
-	promptTemplate := `You are a creative fish species designer for a fishing game. 
-Create a completely unique and imaginative fish species that does not exist in the real world,
-inspired by the following data sources. Focus on creative aspects like appearance, behavior, and abilities.
-
-AVAILABLE CONTEXT DATA:
+Current Context:
 %s
 
-GENERATION REASON: %s
-ECONOMIC CONTEXT: %t
+Your task is to create a new fish species inspired by this context. Be creative and imaginative!
+`, contextDesc))
 
-DESIGN FOCUS - CREATIVE ASPECTS ONLY:
-- Create a fish with a highly unique NAME and APPEARANCE that has never been seen before
-- Design a distinctive COLOR scheme that reflects the context data
-- Invent a specific DIET that would make sense for the fish's habitat and appearance
-- Create a HABITAT description that connects to the available weather/economic data
-- Define a FAVORITE_WEATHER condition when this fish is most likely to be caught
-- Provide a creative EFFECT that happens when the player catches this fish
-- Write a compelling EXISTENCE_REASON that explains WHY this fish evolved or appeared
+	// Add detailed instructions for the model
+	prompt.WriteString(`
+IMPORTANT: Design a fish that reflects the context and real-world data provided above. Your fish should have:
 
-IMPORTANT GUIDELINES:
-- Make the fish's name ABSOLUTELY UNIQUE - it should not match any real fish species
-- No need to focus on size, rarity, value or catch chance - those will be calculated separately
-- Create abilities and effects that reflect the combined context of all data sources
-- For economic news, the fish's appearance should incorporate gold/digital elements
-- Bitcoin changes should influence technological or energetic aspects
-- Gold changes should influence the luster and material qualities
-- Weather conditions should influence the fish's preferred habitat and appearance
+1. A creative name that's humorous, punny, or references the news/data
+2. A detailed appearance description
+3. Habitat and diet that make sense for this fish
+4. A colorful and distinctive look that relates to the news or weather
+5. An interesting effect or quality that makes this fish special
 
-CRITICAL RESPONSE FORMAT INSTRUCTIONS:
-1. Respond with ONLY a valid JSON object - no Markdown formatting, no code blocks
-2. Make sure to include ONLY the fields shown in the template below
-3. Use valid JSON format with double quotes around property names and string values
-4. Do not include numeric fields like size, value, or catch_chance
-5. Make sure all JSON properties are properly separated by commas
-6. The response must be a complete, properly formatted JSON object
+Do not provide numerical details for the following attributes, as these will be generated programmatically:
+- Rarity level
+- Size/length
+- Weight
+- Value
+- Catch chance/difficulty
 
-JSON OBJECT TEMPLATE:
+Respond with a JSON object that includes the following fields:
 {
-  "name": "A highly unique and creative name for the fish species that doesn't exist in reality",
-  "description": "A short description including habitat and notable behaviors",
-  "appearance": "A vivid description of colors, patterns, and unique features",
-  "color": "The main color(s) of the fish (e.g., 'iridescent blue', 'golden')",
-  "diet": "What the fish eats (affects bait selection in game)",
-  "habitat": "The specific environment where this fish lives",
-  "effect": "A gameplay effect when caught (be creative!)",
-  "favorite_weather": "The specific weather condition when this fish is most active",
-  "existence_reason": "Why this fish evolved or appeared, connecting to the context data",
-  "origin_context": "A brief explanation of how the data context influenced this fish's creation"
+  "name": "The fish's creative name",
+  "description": "Detailed, imaginative description",
+  "appearance": "Physical characteristics and notable features",
+  "color": "Primary colors and patterns",
+  "diet": "What the fish eats",
+  "habitat": "Where the fish lives",
+  "effect": "Special quality or effect",
+  "favorite_weather": "Weather condition this fish prefers",
+  "existence_reason": "Brief explanation of why this fish evolved or exists"
+}
+`)
+
+	return prompt.String()
 }
 
-REMEMBER: Return ONLY the valid JSON object with NO markdown formatting or code blocks.`
-
-	// Format the prompt with the context data
-	prompt := fmt.Sprintf(promptTemplate, contextDescription, reason, isEconomicContext)
-
-	return prompt
+// Helper function to describe sentiment as text
+func describeSentiment(sentiment float64) string {
+	if sentiment > 0.3 {
+		return "positive"
+	} else if sentiment < -0.3 {
+		return "negative"
+	}
+	return "neutral"
 }
 
-// Helper function to build context description from available data, including merged news
-func buildContextDescriptionWithMergedNews(newsHeadline, newsCategory, sentiment,
-	mergedNewsHeadline, mergedNewsCategory, mergedNewsSentiment string, hasMergedNews bool,
-	weatherCondition, weatherDescription string, temperature float64,
-	bitcoinPrice, bitcoinChange, goldPrice, goldChange float64) string {
+// Helper function to infer a theme from multiple headlines
+func inferThemeFromHeadlines(headlines []string, categories []string) string {
+	// Simple implementation that combines category information
+	categoryStr := strings.Join(categories, ", ")
 
-	var contextParts []string
+	// Extract key phrases from headlines
+	joinedHeadlines := strings.Join(headlines, " ")
+	words := strings.Fields(joinedHeadlines)
 
+	// Get most frequent meaningful words
+	wordCount := make(map[string]int)
+	for _, word := range words {
+		word = strings.ToLower(strings.Trim(word, ".,;:!?\"'()[]{}"))
+		if len(word) > 4 { // Only consider meaningful words
+			wordCount[word]++
+		}
+	}
+
+	// Find top 3 words
+	type wordFreq struct {
+		word  string
+		count int
+	}
+
+	var freqs []wordFreq
+	for word, count := range wordCount {
+		freqs = append(freqs, wordFreq{word, count})
+	}
+
+	// Sort by frequency
+	sort.Slice(freqs, func(i, j int) bool {
+		return freqs[i].count > freqs[j].count
+	})
+
+	// Get top words
+	var topWords []string
+	for i := 0; i < 3 && i < len(freqs); i++ {
+		topWords = append(topWords, freqs[i].word)
+	}
+
+	return fmt.Sprintf("A fish that combines elements from %s news with themes of %s",
+		categoryStr, strings.Join(topWords, ", "))
+}
+
+// buildContextDescriptionWithMergedNews creates a detailed context description for the prompt
+func (c *GeminiClient) buildContextDescriptionWithMergedNews(
+	contextData map[string]interface{},
+	newsHeadline string,
+	newsCategory string,
+	newsSentiment float64,
+	mergedNewsHeadlines []string,
+	mergedNewsCategories []string,
+	mergedNewsSentiments []float64,
+	hasMergedNews bool) string {
+
+	var description strings.Builder
+
+	// Current date and time
+	currentTime := time.Now()
+	description.WriteString(fmt.Sprintf("CURRENT DATE: %s\n\n", currentTime.Format("January 2, 2006")))
+
+	// PRIMARY NEWS
 	if newsHeadline != "" {
-		contextParts = append(contextParts, fmt.Sprintf("NEWS HEADLINE: \"%s\"", newsHeadline))
-	}
-	if newsCategory != "" {
-		contextParts = append(contextParts, fmt.Sprintf("NEWS CATEGORY: %s", newsCategory))
-	}
-	if sentiment != "" {
-		contextParts = append(contextParts, fmt.Sprintf("NEWS SENTIMENT: %s", sentiment))
+		description.WriteString("PRIMARY NEWS HEADLINE: " + newsHeadline + "\n")
+		description.WriteString("CATEGORY: " + newsCategory + "\n")
+		sentimentDesc := describeSentiment(newsSentiment)
+		description.WriteString("SENTIMENT: " + sentimentDesc + "\n\n")
 	}
 
-	// Add merged news if available
-	if hasMergedNews && mergedNewsHeadline != "" {
-		contextParts = append(contextParts, fmt.Sprintf("SECOND NEWS HEADLINE: \"%s\"", mergedNewsHeadline))
-		if mergedNewsCategory != "" {
-			contextParts = append(contextParts, fmt.Sprintf("SECOND NEWS CATEGORY: %s", mergedNewsCategory))
+	// MERGED NEWS (if available)
+	if hasMergedNews {
+		description.WriteString("RELATED NEWS HEADLINES:\n")
+		for i, headline := range mergedNewsHeadlines {
+			description.WriteString(fmt.Sprintf("%d. %s\n", i+1, headline))
+			description.WriteString("   CATEGORY: " + mergedNewsCategories[i] + "\n")
+			sentimentDesc := describeSentiment(mergedNewsSentiments[i])
+			description.WriteString("   SENTIMENT: " + sentimentDesc + "\n")
 		}
-		if mergedNewsSentiment != "" {
-			contextParts = append(contextParts, fmt.Sprintf("SECOND NEWS SENTIMENT: %s", mergedNewsSentiment))
+		description.WriteString("\n")
+	}
+
+	// ECONOMIC CONTEXT (check all news categories)
+	allCategories := []string{newsCategory}
+	allCategories = append(allCategories, mergedNewsCategories...)
+	allHeadlines := []string{newsHeadline}
+	allHeadlines = append(allHeadlines, mergedNewsHeadlines...)
+
+	hasEconomicContext := false
+	for _, category := range allCategories {
+		if category == "business" || category == "economy" || strings.Contains(category, "finance") {
+			hasEconomicContext = true
+			break
 		}
 	}
 
-	if weatherCondition != "" {
-		contextParts = append(contextParts, fmt.Sprintf("WEATHER CONDITION: %s", weatherCondition))
-	}
-	if weatherDescription != "" {
-		contextParts = append(contextParts, fmt.Sprintf("WEATHER DETAILS: %s", weatherDescription))
-	}
-	if temperature != 0 {
-		contextParts = append(contextParts, fmt.Sprintf("TEMPERATURE: %.1f°C", temperature))
-	}
-	if bitcoinPrice != 0 {
-		contextParts = append(contextParts, fmt.Sprintf("BITCOIN PRICE: $%.2f (%.2f%% change)", bitcoinPrice, bitcoinChange))
-	}
-	if goldPrice != 0 {
-		contextParts = append(contextParts, fmt.Sprintf("GOLD PRICE: $%.2f (%.2f%% change)", goldPrice, goldChange))
+	// Add economic context if relevant
+	if hasEconomicContext {
+		// Add bitcoin price if available
+		if bitcoin, ok := contextData["bitcoin"].(*CryptoPrice); ok && bitcoin != nil {
+			description.WriteString(fmt.Sprintf("BITCOIN PRICE: $%.2f (%.2f%% change)\n",
+				bitcoin.PriceUSD, bitcoin.Change24h))
+		}
+
+		// Add gold price if available
+		if gold, ok := contextData["gold"].(*GoldPrice); ok && gold != nil {
+			description.WriteString(fmt.Sprintf("GOLD PRICE: $%.2f per ounce (%.2f%% change)\n",
+				gold.PriceUSD, gold.Change24h))
+		}
+		description.WriteString("\n")
 	}
 
-	return strings.Join(contextParts, "\n")
+	// WEATHER CONTEXT
+	if weather, ok := contextData["weather"].(*WeatherInfo); ok && weather != nil {
+		description.WriteString(fmt.Sprintf("CURRENT WEATHER: %s, %.1f°C\n",
+			weather.Condition, weather.TempC))
+
+		if weather.IsExtreme {
+			description.WriteString("EXTREME WEATHER ALERT: This is unusual weather\n")
+		}
+		description.WriteString("\n")
+	}
+
+	// CONTEXTUAL THEME based on combining news
+	description.WriteString("CONTEXTUAL THEME: ")
+	if hasMergedNews {
+		// Look for common themes across all news
+		allHeadlines := []string{newsHeadline}
+		allHeadlines = append(allHeadlines, mergedNewsHeadlines...)
+		description.WriteString(fmt.Sprintf("Create a fish inspired by the following theme: %s\n\n",
+			inferThemeFromHeadlines(allHeadlines, allCategories)))
+	} else {
+		description.WriteString(fmt.Sprintf("Create a fish inspired by %s news: %s\n\n",
+			newsCategory, newsHeadline))
+	}
+
+	return description.String()
 }
