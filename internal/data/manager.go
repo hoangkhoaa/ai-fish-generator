@@ -850,9 +850,12 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		// Create current time once to ensure consistent timestamps
 		timestamp := time.Now()
 
-		// Always add the primary news article
-		usedArticles := []map[string]interface{}{
-			{
+		// Initialize the usedArticles array
+		usedArticles := []map[string]interface{}{}
+
+		// Add the primary news article
+		if m.lastNewsData != nil {
+			usedArticles = append(usedArticles, map[string]interface{}{
 				"headline":  m.lastNewsData.Headline,
 				"source":    m.lastNewsData.Source,
 				"url":       m.lastNewsData.URL,
@@ -862,7 +865,7 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 				"published": m.lastNewsData.PublishedAt,
 				"used_at":   timestamp,
 				"is_merged": false,
-			},
+			})
 		}
 
 		// Add all merged news items to the used articles

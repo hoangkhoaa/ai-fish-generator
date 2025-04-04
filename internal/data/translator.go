@@ -73,65 +73,52 @@ func (t *TranslatorClient) TranslateFish(ctx context.Context, fishID string, fie
 	// Extract API key from context
 	apiKey, ok := ctx.Value("gemini_api_key").(string)
 	if !ok || apiKey == "" {
-		log.Printf("ERROR: No API key provided for Gemini. Translation will fail.")
 		return nil, fmt.Errorf("no API key provided in context")
 	}
 
-	// Create a fresh client for each request to avoid stale connections
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	// Initialize the client
+	err := t.initClient(ctx, apiKey)
 	if err != nil {
-		log.Printf("ERROR: Failed to create Gemini client for translation: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("failed to initialize translation client: %v", err)
 	}
-	defer client.Close()
 
 	// Create a model instance
-	model := client.GenerativeModel("gemma-3-27b-it")
+	model := t.client.GenerativeModel(t.model)
 
 	// Configure model settings
 	model.SetTemperature(0.3) // Lower temperature for more accurate translations
 	model.SetTopK(40)
 	model.SetTopP(0.95)
 	model.SetMaxOutputTokens(8192)
-	model.ResponseMIMEType = "text/plain"
 
-	// Start a fresh chat session
-	session := model.StartChat()
-
-	// Build the translation prompt
+	// Build translation prompt
 	prompt := t.buildTranslationPrompt(fields)
 
-	log.Printf("Translating fish content to Vietnamese (Fish ID: %s)", fishID)
-
-	// Send the message to Gemini
-	resp, err := session.SendMessage(ctx, genai.Text(prompt))
+	// Send translation request
+	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
 	if err != nil {
-		log.Printf("ERROR: Translation request failed: %v", err)
-		return nil, fmt.Errorf("error sending translation request: %w", err)
+		return nil, fmt.Errorf("translation API call failed: %v", err)
 	}
 
-	// Process response
 	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
-		log.Printf("ERROR: Empty response from translation model")
-		return nil, fmt.Errorf("empty response from translation model")
+		return nil, fmt.Errorf("empty response from translation API")
 	}
 
-	// Extract response text
-	responseText := ""
-	for _, part := range resp.Candidates[0].Content.Parts {
-		if str, ok := part.(genai.Text); ok {
-			responseText += string(str)
-		}
-	}
+	// Extract text response
+	responseText := fmt.Sprintf("%v", resp.Candidates[0].Content.Parts[0])
 
-	// Parse the translation response
+	// Parse the response
 	translatedFields, err := t.parseTranslationResponse(responseText)
 	if err != nil {
-		log.Printf("ERROR: Failed to parse translation response: %v", err)
-		return nil, fmt.Errorf("failed to parse translation response: %w", err)
+		return nil, err
 	}
 
-	// Create the translated fish object
+	// Validate the translated fields
+	if translatedFields.Name == "" || translatedFields.Description == "" {
+		return nil, fmt.Errorf("critical translated fields are missing or empty")
+	}
+
+	// Create TranslatedFish record
 	translatedFish := &TranslatedFish{
 		OriginalID:      fishID,
 		Name:            translatedFields.Name,
@@ -146,72 +133,64 @@ func (t *TranslatorClient) TranslateFish(ctx context.Context, fishID string, fie
 		TranslatedAt:    time.Now(),
 	}
 
-	log.Printf("Successfully translated fish content to Vietnamese (Fish ID: %s)", fishID)
 	return translatedFish, nil
 }
 
 // buildTranslationPrompt creates a prompt for translating fish content to Vietnamese
 func (t *TranslatorClient) buildTranslationPrompt(fields TranslationFields) string {
-	return fmt.Sprintf(`You are a professional translator specializing in English to Vietnamese translation.
-Your task is to translate the following fish description from a fishing game to Vietnamese.
-Maintain the original meaning while making the Vietnamese text flow naturally.
+	return `Translate the following fish information from English to Vietnamese. 
+Keep the translation natural and fluent in Vietnamese.
+Just return the translated content exactly in the same JSON format, without any additional text.
+Do not include any instructions, notes, or metadata in your response.
 
-Please translate ONLY the following fields:
-
-Name: %s
-Description: %s
-Appearance: %s
-Color: %s
-Diet: %s
-Habitat: %s
-Effect: %s
-Favorite Weather: %s
-Existence Reason: %s
-
-Respond with ONLY a JSON object containing the translated fields:
+Input JSON to translate:
 {
-  "name": "translated name in Vietnamese",
-  "description": "translated description in Vietnamese",
-  "appearance": "translated appearance in Vietnamese",
-  "color": "translated color in Vietnamese",
-  "diet": "translated diet in Vietnamese",
-  "habitat": "translated habitat in Vietnamese",
-  "effect": "translated effect in Vietnamese",
-  "favorite_weather": "translated favorite weather in Vietnamese",
-  "existence_reason": "translated existence reason in Vietnamese"
+  "name": "` + fields.Name + `",
+  "description": "` + fields.Description + `",
+  "appearance": "` + fields.Appearance + `",
+  "color": "` + fields.Color + `",
+  "diet": "` + fields.Diet + `",
+  "habitat": "` + fields.Habitat + `",
+  "effect": "` + fields.Effect + `",
+  "favorite_weather": "` + fields.FavoriteWeather + `",
+  "existence_reason": "` + fields.ExistenceReason + `"
 }
 
-Return ONLY the valid JSON object with no additional text.
-`, fields.Name, fields.Description, fields.Appearance, fields.Color, fields.Diet,
-		fields.Habitat, fields.Effect, fields.FavoriteWeather, fields.ExistenceReason)
+Your response must be a valid JSON object containing exactly these fields with their translations in Vietnamese. Do not include any explanatory text before or after the JSON.`
 }
 
-// parseTranslationResponse extracts the translated fields from the Gemini response
-func (t *TranslatorClient) parseTranslationResponse(response string) (*TranslationFields, error) {
-	// Remove Markdown code block markers if present
-	response = strings.ReplaceAll(response, "```json", "")
-	response = strings.ReplaceAll(response, "```", "")
-	response = strings.TrimSpace(response)
+// parseTranslationResponse extracts the translated fields from the API response
+func (t *TranslatorClient) parseTranslationResponse(response string) (TranslationFields, error) {
+	var fields TranslationFields
 
-	// Extract JSON object from response
+	// Look for the JSON object
 	jsonStart := strings.Index(response, "{")
 	jsonEnd := strings.LastIndex(response, "}")
 
 	if jsonStart == -1 || jsonEnd == -1 || jsonEnd <= jsonStart {
-		return nil, fmt.Errorf("could not find valid JSON in translation response")
+		return fields, fmt.Errorf("invalid JSON response format: %s", response)
 	}
 
 	// Extract just the JSON part
 	jsonStr := response[jsonStart : jsonEnd+1]
 
-	// Parse the JSON response
-	var translatedFields TranslationFields
-	err := json.Unmarshal([]byte(jsonStr), &translatedFields)
+	// Clean up any markdown code block markers
+	jsonStr = strings.ReplaceAll(jsonStr, "```json", "")
+	jsonStr = strings.ReplaceAll(jsonStr, "```", "")
+	jsonStr = strings.TrimSpace(jsonStr)
+
+	// Try to unmarshal the JSON
+	err := json.Unmarshal([]byte(jsonStr), &fields)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse translation JSON: %w", err)
+		return fields, fmt.Errorf("failed to parse translation response: %v\nResponse: %s", err, jsonStr)
 	}
 
-	return &translatedFields, nil
+	// Double check for empty fields
+	if fields.Name == "" || fields.Description == "" {
+		log.Printf("Warning: Some translated fields are empty: %+v", fields)
+	}
+
+	return fields, nil
 }
 
 // Close releases resources used by the translator client
