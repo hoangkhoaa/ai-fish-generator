@@ -121,8 +121,13 @@ func main() {
 
 	// Initialize translation service if storage is available
 	if storageAdapter != nil {
-		// Load translation settings
-		translationSettings := data.LoadTranslationSettings()
+		// Load translation settings from config
+		translationSettings := data.TranslationSettings{
+			Enabled:  conf.EnableTranslation,
+			Interval: time.Duration(conf.TranslationInterval) * time.Minute,
+			ApiKey:   conf.GeminiAPIKey,
+		}
+
 		if translationSettings.Enabled {
 			log.Println("Initializing translation service")
 			translationManager := data.NewTranslationManager(translationSettings, storageAdapter)

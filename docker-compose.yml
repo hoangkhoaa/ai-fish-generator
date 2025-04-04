@@ -24,6 +24,8 @@ services:
       - GENERATION_COOLDOWN=${GENERATION_COOLDOWN:-15}
       - USE_AI=${USE_AI:-true}
       - TEST_MODE=false
+      - ENABLE_TRANSLATION=${ENABLE_TRANSLATION:-0}
+      - TRANSLATION_INTERVAL=${TRANSLATION_INTERVAL:-2}
     ports:
       - "8080:8080"
     volumes:

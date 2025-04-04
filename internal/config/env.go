@@ -30,6 +30,10 @@ type Config struct {
 	PriceInterval      float64
 	NewsInterval       float64
 	GenerationCooldown int // in minutes
+
+	// Translation settings
+	EnableTranslation   bool
+	TranslationInterval int // in minutes
 }
 
 // LoadEnv loads environment variables from a .env file
@@ -96,6 +100,11 @@ func NewConfig() *Config {
 		generationCooldown = 15 // Default: 15 minutes between fish generations
 	}
 
+	translationInterval, err := strconv.Atoi(os.Getenv("TRANSLATION_INTERVAL"))
+	if err != nil || translationInterval <= 0 {
+		translationInterval = 2 // Default: translate one fish every 2 minutes
+	}
+
 	return &Config{
 		GeminiAPIKey:   os.Getenv("GEMINI_API_KEY"),
 		UseAI:          os.Getenv("USE_AI") == "true" || os.Getenv("USE_AI") == "1",
@@ -116,6 +125,10 @@ func NewConfig() *Config {
 		PriceInterval:      priceInterval,
 		NewsInterval:       newsInterval,
 		GenerationCooldown: generationCooldown,
+
+		// Translation settings
+		EnableTranslation:   os.Getenv("ENABLE_TRANSLATION") == "1",
+		TranslationInterval: translationInterval,
 	}
 }
 
