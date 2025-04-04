@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     depends_on:
       - mongodb
+    env_file:
+      - .env
     environment:
       - MONGODB_URI=mongodb://mongodb:27017/fish_generator
       - WEATHER_API_KEY=${WEATHER_API_KEY}
@@ -30,6 +32,8 @@ services:
     image: mongo:6
     container_name: fish-mongodb
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - mongodb_data:/data/db
     ports:
@@ -39,8 +43,8 @@ services:
     environment:
       - MONGO_INITDB_DATABASE=fish_generator
       # Uncomment these if you need authentication
-      # - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
-      # - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_USERNAME}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_PASSWORD}
 
 networks:
   fish-network:
