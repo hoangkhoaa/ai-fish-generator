@@ -23,8 +23,18 @@ type TranslationFields struct {
 	Habitat         string `json:"habitat,omitempty"`
 	FavoriteWeather string `json:"favorite_weather"`
 	ExistenceReason string `json:"existence_reason"`
-	Effect          string `json:"effect"`
-	PlayerEffect    string `json:"player_effect"`
+	Effect          string `json:"effect,omitempty"`        // Keeping for backward compatibility
+	PlayerEffect    string `json:"player_effect,omitempty"` // Keeping for backward compatibility
+
+	// New fields for stat effects
+	StatEffects []StatEffectTranslation `json:"stat_effects,omitempty"`
+}
+
+// StatEffectTranslation represents an individual stat effect that needs translation
+type StatEffectTranslation struct {
+	ID          string `json:"id"`          // Identifier for the effect (used for mapping)
+	EffectType  string `json:"effect_type"` // Type of effect (environment, player, etc.)
+	Description string `json:"description"` // Description to translate
 }
 
 // TranslatedFish contains both original fish ID and translated content
@@ -138,6 +148,25 @@ func (t *TranslatorClient) TranslateFish(ctx context.Context, fields Translation
 
 // buildTranslationPrompt creates a prompt for the Gemini API to translate fish content
 func (t *TranslatorClient) buildTranslationPrompt(fields TranslationFields) string {
+	// Build stat effects section if we have any
+	statEffectsPrompt := ""
+	if len(fields.StatEffects) > 0 {
+		statEffectsPrompt = "Stat Effects:\n"
+		for i, effect := range fields.StatEffects {
+			statEffectsPrompt += fmt.Sprintf("- Effect %d (Type: %s): %s\n",
+				i+1, effect.EffectType, effect.Description)
+		}
+	} else if fields.Effect != "" || fields.PlayerEffect != "" {
+		// Include legacy effect fields if no stat effects are provided
+		statEffectsPrompt = "Effects:\n"
+		if fields.Effect != "" {
+			statEffectsPrompt += fmt.Sprintf("- Environment Effect: %s\n", fields.Effect)
+		}
+		if fields.PlayerEffect != "" {
+			statEffectsPrompt += fmt.Sprintf("- Player Effect: %s\n", fields.PlayerEffect)
+		}
+	}
+
 	return fmt.Sprintf(`
 You are a professional translator specializing in Vietnamese translations for a fish-themed game.
 Please translate the following fish description fields from English to Vietnamese.
@@ -152,8 +181,7 @@ Original fields:
 - Habitat: %s
 - Favorite Weather: %s
 - Existence Reason: %s
-- Effect: %s
-- Player Effect: %s
+%s
 
 Return only a JSON object with the translated fields in this exact format:
 {
@@ -164,12 +192,31 @@ Return only a JSON object with the translated fields in this exact format:
   "habitat": "[Vietnamese translation]",
   "favorite_weather": "[Vietnamese translation]",
   "existence_reason": "[Vietnamese translation]",
-  "effect": "[Vietnamese translation]",
-  "player_effect": "[Vietnamese translation]"
+  %s
 }
 `, fields.Name, fields.Description, fields.Color, fields.Diet,
 		fields.Habitat, fields.FavoriteWeather, fields.ExistenceReason,
-		fields.Effect, fields.PlayerEffect)
+		statEffectsPrompt,
+		t.buildStatEffectsResponseTemplate(fields.StatEffects))
+}
+
+// buildStatEffectsResponseTemplate creates the template part of the prompt for stat effects
+func (t *TranslatorClient) buildStatEffectsResponseTemplate(effects []StatEffectTranslation) string {
+	if len(effects) > 0 {
+		template := "\"stat_effects\": [\n"
+		for i, effect := range effects {
+			template += fmt.Sprintf("    {\"id\": \"%s\", \"description\": \"[Vietnamese translation]\"}", effect.ID)
+			if i < len(effects)-1 {
+				template += ","
+			}
+			template += "\n"
+		}
+		template += "  ]"
+		return template
+	} else {
+		// Backward compatibility
+		return "\"effect\": \"[Vietnamese translation]\",\n  \"player_effect\": \"[Vietnamese translation]\""
+	}
 }
 
 // SanitizeUTF8 ensures that all strings are valid UTF-8 before storing in MongoDB
@@ -348,6 +395,11 @@ func (t *TranslatorClient) parseTranslationResponse(response string) (*Translati
 	translatedFields.ExistenceReason = SanitizeUTF8(translatedFields.ExistenceReason)
 	translatedFields.Effect = SanitizeUTF8(translatedFields.Effect)
 	translatedFields.PlayerEffect = SanitizeUTF8(translatedFields.PlayerEffect)
+
+	// Sanitize stat effects
+	for i := range translatedFields.StatEffects {
+		translatedFields.StatEffects[i].Description = SanitizeUTF8(translatedFields.StatEffects[i].Description)
+	}
 
 	return &translatedFields, nil
 }
