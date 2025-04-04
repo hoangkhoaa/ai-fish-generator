@@ -57,9 +57,16 @@ if [ -d .git ]; then
   git pull
 fi
 
-# Stop any running containers first
+# Stop any running containers and remove volumes if needed
 echo "Stopping any running containers..."
 $DOCKER_COMPOSE down
+
+# Ask if volumes should be removed (useful for auth issues)
+read -p "Do you want to remove volumes to start fresh? (useful for MongoDB auth issues) [y/N]: " remove_volumes
+if [[ "$remove_volumes" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+  echo "Removing volumes for a fresh start..."
+  $DOCKER_COMPOSE down -v
+fi
 
 # Build and start containers
 echo "Building and starting Docker containers..."
@@ -67,18 +74,29 @@ $DOCKER_COMPOSE build --no-cache
 $DOCKER_COMPOSE up -d
 
 # Wait for MongoDB to be ready
-echo "Waiting for MongoDB to initialize..."
-sleep 10
+echo "Waiting for MongoDB to initialize (this may take up to 30 seconds)..."
+sleep 20
 
 # Check if containers are running
 echo "Checking service status..."
 if $DOCKER_COMPOSE ps | grep -q "fish-generate" && $DOCKER_COMPOSE ps | grep -q "fish-mongodb"; then
-  echo "Fish Generate service is running!"
-  echo "You can check logs with: $DOCKER_COMPOSE logs -f app"
+  echo "Containers are running. Checking logs for MongoDB connection..."
+  
+  # Check logs for successful MongoDB connection
+  if $DOCKER_COMPOSE logs app | grep -q "MongoDB connection failed"; then
+    echo "⚠️ Warning: MongoDB connection issues detected. See logs for details."
+    echo "You may need to:"
+    echo "  1. Update your MONGO_URI in docker-compose.yml"
+    echo "  2. Run this script again with the option to remove volumes"
+    $DOCKER_COMPOSE logs app | grep -A 5 -B 5 "MongoDB connection"
+  else
+    echo "✅ Services appear to be running correctly."
+  fi
+  
+  echo "Fish Generate service deployment completed."
+  echo "You can check detailed logs with: $DOCKER_COMPOSE logs -f app"
 else
-  echo "Error: Service failed to start. Check logs with: $DOCKER_COMPOSE logs"
+  echo "❌ Error: Service failed to start. Checking logs..."
   $DOCKER_COMPOSE logs app
   exit 1
-fi
-
-echo "Deployment completed successfully!" 
+fi 

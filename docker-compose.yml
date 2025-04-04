@@ -8,7 +8,8 @@ services:
     container_name: fish-generate
     restart: unless-stopped
     depends_on:
-      - mongodb
+      mongodb:
+        condition: service_healthy
     env_file:
       - .env
     environment:
@@ -37,15 +38,21 @@ services:
       - .env
     volumes:
       - mongodb_data:/data/db
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
     ports:
       - "27018:27017"
     networks:
       - fish-network
     environment:
-      # Extract username and password from MONGO_URI if present
-      - MONGO_INITDB_DATABASE=${MONGO_DB:-fish_generator}
+      - MONGO_INITDB_DATABASE=fish_generator
       - MONGO_INITDB_ROOT_USERNAME=fishuser
       - MONGO_INITDB_ROOT_PASSWORD=yourpassword
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
 networks:
   fish-network:
