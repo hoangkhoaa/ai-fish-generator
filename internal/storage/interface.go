@@ -7,7 +7,7 @@ import (
 	"fish-generate/internal/fish"
 )
 
-// StorageAdapter defines the interface for storage operations
+// StorageAdapter defines the main interface for storage operations
 type StorageAdapter interface {
 	// Weather data operations
 	SaveWeatherData(ctx context.Context, weatherInfo *data.WeatherInfo, regionID, cityID string) error
@@ -22,7 +22,7 @@ type StorageAdapter interface {
 	GetRecentNewsData(ctx context.Context, limit int) ([]*data.NewsItem, error)
 
 	// Fish data operations
-	SaveFishData(ctx context.Context, fishItem interface{}) error
+	SaveFishData(ctx context.Context, fishData interface{}) error
 	GetDailyFishCount(ctx context.Context) (int, error)
 	GetSimilarFish(ctx context.Context, dataSource string, rarityLevel string) (*fish.Fish, error)
 	GetFishByRegion(ctx context.Context, regionID string, limit int) ([]*fish.Fish, error)
@@ -39,4 +39,6 @@ type StorageAdapter interface {
 	SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error
 	GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error)
 	GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error)
+	GetUntranslatedFish(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error
 }

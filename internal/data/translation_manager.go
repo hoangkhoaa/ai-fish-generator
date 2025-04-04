@@ -128,23 +128,37 @@ func (t *TranslationManager) translateNextFish(ctx context.Context) {
 	fields := TranslationFields{
 		Name:            extractStringField(fishData, "name"),
 		Description:     extractStringField(fishData, "description"),
-		Appearance:      extractStringField(fishData, "appearance"),
 		Color:           extractStringField(fishData, "color"),
 		Diet:            extractStringField(fishData, "diet"),
 		Habitat:         extractStringField(fishData, "habitat"),
 		Effect:          extractStringField(fishData, "effect"),
 		FavoriteWeather: extractStringField(fishData, "favorite_weather"),
 		ExistenceReason: extractStringField(fishData, "existence_reason"),
+		PlayerEffect:    "Affects player abilities based on fish value", // Default player effect
 	}
 
 	// Create context with API key
 	translationCtx := context.WithValue(ctx, "gemini_api_key", t.settings.ApiKey)
 
 	// Translate fish content
-	translatedFish, err := t.translatorClient.TranslateFish(translationCtx, fishID, fields)
+	translatedFields, err := t.translatorClient.TranslateFish(translationCtx, fields)
 	if err != nil {
 		logError("Translation failed: %v", err)
 		return
+	}
+
+	// Convert TranslationFields to TranslatedFish
+	translatedFish := &TranslatedFish{
+		OriginalID:      fishID,
+		Name:            translatedFields.Name,
+		Description:     translatedFields.Description,
+		Color:           translatedFields.Color,
+		Diet:            translatedFields.Diet,
+		Habitat:         translatedFields.Habitat,
+		Effect:          translatedFields.Effect,
+		FavoriteWeather: translatedFields.FavoriteWeather,
+		ExistenceReason: translatedFields.ExistenceReason,
+		TranslatedAt:    time.Now(),
 	}
 
 	// Save translated fish to database

@@ -47,7 +47,7 @@ func main() {
 	model := client.GenerativeModel("gemma-3-27b-it")
 
 	// Configure model
-	model.SetTemperature(0.77)
+	model.SetTemperature(0.9)
 	model.SetTopK(64)
 	model.SetTopP(0.95)
 	model.SetMaxOutputTokens(8192)

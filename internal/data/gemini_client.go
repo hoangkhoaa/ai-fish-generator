@@ -84,7 +84,7 @@ func (c *GeminiClient) GenerateFishFromNews(ctx context.Context, newsItem *NewsI
 	model := client.GenerativeModel("gemma-3-27b-it")
 
 	// Configure model settings
-	model.SetTemperature(0.85) // Slightly reduced from 1.0 for more consistent output
+	model.SetTemperature(0.9) // Slightly reduced from 1.0 for more consistent output
 	model.SetTopK(64)
 	model.SetTopP(0.95)
 	model.SetMaxOutputTokens(8192)
@@ -399,7 +399,7 @@ func (c *GeminiClient) GenerateUniqueFishFromContext(ctx context.Context, contex
 	model := client.GenerativeModel("gemma-3-27b-it")
 
 	// Configure model settings
-	model.SetTemperature(0.85) // Slightly reduced for more consistent output
+	model.SetTemperature(0.9) // Slightly reduced for more consistent output
 	model.SetTopK(64)
 	model.SetTopP(0.95)
 	model.SetMaxOutputTokens(8192)

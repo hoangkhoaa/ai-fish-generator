@@ -21,6 +21,8 @@ const (
 	logColorPurple = "\033[35m"
 	logColorCyan   = "\033[36m"
 	logColorWhite  = "\033[37m"
+	// Add a new log color for translations
+	logColorTeal = "\033[36;1m" // Bright cyan for translation logs
 )
 
 // GenerationRequest represents a queued fish generation request
@@ -61,6 +63,11 @@ func logError(format string, v ...interface{}) {
 	log.Printf(logColorRed+"[ERROR] "+format+logColorReset, v...)
 }
 
+// logTranslation logs translation-related messages with teal color
+func logTranslation(format string, v ...interface{}) {
+	log.Printf(logColorTeal+"[TRANSLATE] "+format+logColorReset, v...)
+}
+
 // DatabaseClient defines the interface for database operations
 type DatabaseClient interface {
 	SaveWeatherData(ctx context.Context, weatherInfo *WeatherInfo, regionID, cityID string) error
@@ -75,16 +82,21 @@ type DatabaseClient interface {
 	GetUsedNewsIDs(ctx context.Context) (map[string]bool, error)
 	SaveGenerationQueue(ctx context.Context, queue []GenerationRequest) error
 	GetGenerationQueue(ctx context.Context) ([]GenerationRequest, error)
+	// Methods for translation
+	GetUntranslatedFish(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error
 }
 
 // CollectionSettings holds configuration for data collection
 type CollectionSettings struct {
-	WeatherInterval    time.Duration // 1 hour in production
-	PriceInterval      time.Duration // 6 hours in production
-	NewsInterval       time.Duration // 20 minutes in production
-	TestMode           bool
-	GeminiApiKey       string        // API key for Gemini
-	GenerationCooldown time.Duration // Optional generation cooldown
+	WeatherInterval     time.Duration // 1 hour in production
+	PriceInterval       time.Duration // 6 hours in production
+	NewsInterval        time.Duration // 20 minutes in production
+	TestMode            bool
+	GeminiApiKey        string        // API key for Gemini
+	GenerationCooldown  time.Duration // Optional generation cooldown
+	EnableTranslation   bool          // Whether to enable Vietnamese translation
+	TranslationCooldown time.Duration // Cooldown between translations
 }
 
 // DataManager handles data collection across different regions and sources
@@ -96,6 +108,7 @@ type DataManager struct {
 	goldCollector    *GoldCollector
 	newsCollector    *NewsCollector
 	geminiClient     *GeminiClient
+	translatorClient *TranslatorClient // Add translator client
 	regions          []Region
 	cancelFuncs      []context.CancelFunc
 	mu               sync.Mutex
@@ -120,6 +133,9 @@ type DataManager struct {
 	queueProcessRunning bool
 	// Add WaitGroup to track running goroutines
 	wg sync.WaitGroup
+	// Translation tracking
+	lastTranslation     time.Time
+	translationCooldown time.Duration
 }
 
 // NewDataManager creates a new data manager
@@ -152,6 +168,21 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		generationCooldown = 25 * time.Minute // 25 minutes in production
 	}
 
+	// Set translation cooldown or use default
+	var translationCooldown time.Duration
+	if settings.TranslationCooldown > 0 {
+		translationCooldown = settings.TranslationCooldown
+	} else {
+		translationCooldown = 2 * time.Minute // 2 minutes default for translation
+	}
+
+	// Create translator client if translation is enabled
+	var translatorClient *TranslatorClient
+	if settings.EnableTranslation {
+		translatorClient = NewTranslatorClient(geminiApiKey)
+		log.Println("Vietnamese fish translation enabled with cooldown:", translationCooldown)
+	}
+
 	return &DataManager{
 		settings:             settings,
 		db:                   db,
@@ -160,6 +191,7 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		goldCollector:        NewGoldCollector(metalPriceApiKey),
 		newsCollector:        NewNewsCollector(newsApiKey),
 		geminiClient:         NewGeminiClient(geminiApiKey),
+		translatorClient:     translatorClient,
 		regions:              regions,
 		cancelFuncs:          make([]context.CancelFunc, 0),
 		initialDataCollected: false,
@@ -172,6 +204,8 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		mergedNewsItem:       nil, // Initialize to nil
 		mergedNewsItems:      make([]*NewsItem, 0),
 		wg:                   sync.WaitGroup{},
+		lastTranslation:      time.Time{}, // Zero time means no translation has happened yet
+		translationCooldown:  translationCooldown,
 	}
 }
 
@@ -197,6 +231,13 @@ func (m *DataManager) Start(ctx context.Context) {
 		defer priceTicker.Stop()
 		defer newsTicker.Stop()
 
+		// Add a ticker for checking for fish to translate
+		var translationTicker *time.Ticker
+		if m.settings.EnableTranslation {
+			translationTicker = time.NewTicker(30 * time.Second)
+			defer translationTicker.Stop()
+		}
+
 		for {
 			select {
 			case <-weatherTicker.C:
@@ -212,6 +253,12 @@ func (m *DataManager) Start(ctx context.Context) {
 			case <-newsTicker.C:
 				// Collect news data
 				m.collectNewsData(baseCtx)
+
+			case <-translationTicker.C:
+				// Check for fish to translate if enabled
+				if m.settings.EnableTranslation {
+					m.checkForFishToTranslate(baseCtx)
+				}
 
 			case <-baseCtx.Done():
 				log.Println("Data collection goroutine stopped")
@@ -716,10 +763,6 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		logFish("Habitat: %s", fishData.Habitat)
 	}
 
-	// Clear the merged news data to avoid reusing it
-	m.mergedNewsItems = nil
-	m.mergedNewsItem = nil // For backward compatibility
-
 	// Override AI-generated numerical values with more varied random values
 
 	// Create a new random source with current time as seed for better randomness
@@ -851,7 +894,7 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		timestamp := time.Now()
 
 		// Initialize the usedArticles array
-		usedArticles := []map[string]interface{}{}
+		usedArticles := make([]map[string]interface{}, 0)
 
 		// Add the primary news article
 		if m.lastNewsData != nil {
@@ -869,7 +912,7 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		}
 
 		// Add all merged news items to the used articles
-		if len(m.mergedNewsItems) > 0 {
+		if m.mergedNewsItems != nil && len(m.mergedNewsItems) > 0 {
 			for _, news := range m.mergedNewsItems {
 				if news != nil {
 					usedArticles = append(usedArticles, map[string]interface{}{
@@ -940,6 +983,10 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 			logError("Database client doesn't support SaveFishData method")
 		}
 	}
+
+	// Clear the merged news data to avoid reusing it - moved here to ensure all news items are saved first
+	m.mergedNewsItems = nil
+	m.mergedNewsItem = nil // For backward compatibility
 
 	// After successful generation, mark all used news as used
 	newsID := m.lastNewsData.Source + ":" + m.lastNewsData.Headline
@@ -1413,4 +1460,131 @@ func (m *DataManager) processGenerationQueue() {
 			request.Reason, queueLen)
 		m.generateFishWithLock(ctx, request.Reason)
 	}
+}
+
+// checkForFishToTranslate checks for recently generated fish that need translation
+func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
+	// Skip if translation is disabled or translator is not initialized
+	if !m.settings.EnableTranslation || m.translatorClient == nil {
+		return
+	}
+
+	// Check cooldown
+	m.mu.Lock()
+	currentTime := time.Now()
+	timeSinceLastTranslation := currentTime.Sub(m.lastTranslation)
+
+	if !m.lastTranslation.IsZero() && timeSinceLastTranslation < m.translationCooldown {
+		m.mu.Unlock()
+		return // Still on cooldown
+	}
+	m.mu.Unlock()
+
+	// Find untranslated fish
+	untranslatedFish, err := m.db.GetUntranslatedFish(ctx, 1)
+	if err != nil {
+		logError("Error finding untranslated fish: %v", err)
+		return
+	}
+
+	if len(untranslatedFish) == 0 {
+		// No untranslated fish found, nothing to do
+		return
+	}
+
+	// Get the first untranslated fish
+	fishToTranslate := untranslatedFish[0]
+
+	// Start translation
+	logTranslation("Translating fish: %s", fishToTranslate["name"])
+
+	// Extract fields to translate
+	fieldsToTranslate := TranslationFields{
+		Name:            fishToTranslate["name"].(string),
+		Description:     fishToTranslate["description"].(string),
+		Color:           fishToTranslate["color"].(string),
+		Diet:            fishToTranslate["diet"].(string),
+		Habitat:         fishToTranslate["habitat"].(string),
+		FavoriteWeather: fishToTranslate["favorite_weather"].(string),
+		ExistenceReason: fishToTranslate["existence_reason"].(string),
+	}
+
+	// Extract stat effects for translation
+	statEffects := fishToTranslate["stat_effects"].([]interface{})
+	for _, effectInterface := range statEffects {
+		effect := effectInterface.(map[string]interface{})
+		if effect["effect_type"] == "environment" {
+			fieldsToTranslate.Effect = effect["description"].(string)
+			fieldsToTranslate.FavoriteWeather = effect["weather_type"].(string)
+		} else if effect["effect_type"] == "player" {
+			fieldsToTranslate.PlayerEffect = effect["description"].(string)
+		}
+	}
+
+	// Set the cooldown before translation to prevent multiple translations at once
+	m.mu.Lock()
+	m.lastTranslation = currentTime
+	m.mu.Unlock()
+
+	// Translate the fish
+	translatedFields, err := m.translatorClient.TranslateFish(ctx, fieldsToTranslate)
+	if err != nil {
+		logError("Error translating fish: %v", err)
+		return
+	}
+
+	// Create a copy of the original fish with translated fields
+	translatedFish := map[string]interface{}{}
+	for k, v := range fishToTranslate {
+		translatedFish[k] = v
+	}
+
+	// Set translated fields
+	translatedFish["name_vi"] = translatedFields.Name
+	translatedFish["description_vi"] = translatedFields.Description
+	translatedFish["color_vi"] = translatedFields.Color
+	translatedFish["diet_vi"] = translatedFields.Diet
+	translatedFish["existence_reason_vi"] = translatedFields.ExistenceReason
+	translatedFish["is_translated"] = true
+	translatedFish["translated_at"] = time.Now()
+
+	// Set habitat if it exists
+	if translatedFields.Habitat != "" {
+		translatedFish["habitat_vi"] = translatedFields.Habitat
+	}
+
+	// Update stat effects with translations
+	translatedStatEffects := make([]map[string]interface{}, len(statEffects))
+	for i, effectInterface := range statEffects {
+		effect := effectInterface.(map[string]interface{})
+		translatedEffect := map[string]interface{}{}
+
+		// Copy all fields
+		for k, v := range effect {
+			translatedEffect[k] = v
+		}
+
+		// Add translated fields
+		if effect["effect_type"] == "environment" {
+			translatedEffect["description_vi"] = translatedFields.Effect
+			translatedEffect["weather_type_vi"] = translatedFields.FavoriteWeather
+		} else if effect["effect_type"] == "player" {
+			translatedEffect["description_vi"] = translatedFields.PlayerEffect
+		}
+
+		translatedStatEffects[i] = translatedEffect
+	}
+
+	translatedFish["stat_effects"] = translatedStatEffects
+	translatedFish["favorite_weather_vi"] = translatedFields.FavoriteWeather
+
+	// Save the translated fish back to the database
+	fishID := fishToTranslate["_id"]
+	err = m.db.UpdateFishWithTranslation(ctx, fishID, translatedFish)
+	if err != nil {
+		logError("Error saving translated fish: %v", err)
+		return
+	}
+
+	logTranslation("Successfully translated fish '%s' to Vietnamese", fishToTranslate["name"])
 }

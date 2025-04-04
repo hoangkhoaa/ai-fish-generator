@@ -1230,3 +1230,70 @@ func (m *MongoDB) GetFishByID(ctx context.Context, id string) (map[string]interf
 
 	return result, nil
 }
+
+// GetUntranslatedFish retrieves fish that haven't been translated to Vietnamese yet
+func (m *MongoDB) GetUntranslatedFish(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	// Create a filter for fish that haven't been translated yet
+	filter := bson.M{
+		"is_translated": bson.M{"$ne": true}, // Find fish without the is_translated flag
+	}
+
+	// Options for sorting and limiting results
+	opts := options.Find().
+		SetSort(bson.M{"generated_at": -1}). // Most recent first
+		SetLimit(int64(limit))
+
+	// Execute the query
+	coll := m.client.Database(m.database).Collection(fishCollection)
+	cursor, err := coll.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, fmt.Errorf("error finding untranslated fish: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	// Decode the results
+	var results []map[string]interface{}
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, fmt.Errorf("error decoding untranslated fish: %w", err)
+	}
+
+	if len(results) == 0 {
+		return []map[string]interface{}{}, nil // Return empty slice, not nil
+	}
+
+	return results, nil
+}
+
+// UpdateFishWithTranslation updates a fish document with translated fields
+func (m *MongoDB) UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error {
+	// Convert string ID to ObjectID if needed
+	var objectID primitive.ObjectID
+	switch id := fishID.(type) {
+	case string:
+		var err error
+		objectID, err = primitive.ObjectIDFromHex(id)
+		if err != nil {
+			return fmt.Errorf("invalid fish ID format: %w", err)
+		}
+	case primitive.ObjectID:
+		objectID = id
+	default:
+		// Try to use the _id directly as provided
+		objectID, _ = fishID.(primitive.ObjectID)
+	}
+
+	// Create the filter using the ID
+	filter := bson.M{"_id": objectID}
+
+	// Define the update operation (replace the entire document)
+	update := bson.M{"$set": translatedFish}
+
+	// Execute the update
+	coll := m.client.Database(m.database).Collection(fishCollection)
+	_, err := coll.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("error updating fish with translation: %w", err)
+	}
+
+	return nil
+}

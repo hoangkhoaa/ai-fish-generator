@@ -31,6 +31,8 @@ type DatabaseClient interface {
 	SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error
 	GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error)
 	GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error)
+	GetUntranslatedFish(ctx context.Context, limit int) ([]map[string]interface{}, error)
+	UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error
 }
 
 // MongoDBAdapter adapts the MongoDB interface to the internal data interfaces
@@ -277,6 +279,16 @@ func (a *MongoDBAdapter) GetTranslatedFish(ctx context.Context, originalID strin
 // GetUntranslatedFishIDs retrieves IDs of fish that haven't been translated yet
 func (a *MongoDBAdapter) GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error) {
 	return a.db.GetUntranslatedFishIDs(ctx, limit)
+}
+
+// GetUntranslatedFish retrieves fish that haven't been translated to Vietnamese yet
+func (a *MongoDBAdapter) GetUntranslatedFish(ctx context.Context, limit int) ([]map[string]interface{}, error) {
+	return a.db.GetUntranslatedFish(ctx, limit)
+}
+
+// UpdateFishWithTranslation updates a fish document with translated fields
+func (a *MongoDBAdapter) UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error {
+	return a.db.UpdateFishWithTranslation(ctx, fishID, translatedFish)
 }
 
 // Helper functions to convert between MongoDB and data types
