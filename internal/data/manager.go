@@ -79,11 +79,12 @@ type DatabaseClient interface {
 
 // CollectionSettings holds configuration for data collection
 type CollectionSettings struct {
-	WeatherInterval time.Duration // 1 hour in production
-	PriceInterval   time.Duration // 6 hours in production
-	NewsInterval    time.Duration // 12 hours in production
-	TestMode        bool
-	GeminiApiKey    string // API key for Gemini
+	WeatherInterval    time.Duration // 1 hour in production
+	PriceInterval      time.Duration // 6 hours in production
+	NewsInterval       time.Duration // 12 hours in production
+	TestMode           bool
+	GeminiApiKey       string        // API key for Gemini
+	GenerationCooldown time.Duration // Optional generation cooldown
 }
 
 // DataManager handles data collection across different regions and sources
@@ -135,10 +136,17 @@ func NewDataManager(settings CollectionSettings, db DatabaseClient,
 		settings.NewsInterval = 12 * time.Hour // Keep 12 hours default for news
 	}
 
-	// Set generation cooldown based on test mode
-	generationCooldown := 15 * time.Minute // 15 minutes in production
-	if settings.TestMode {
+	// Set generation cooldown based on test mode or settings
+	var generationCooldown time.Duration
+	if settings.GenerationCooldown > 0 {
+		// Use the value from settings if provided
+		generationCooldown = settings.GenerationCooldown
+	} else if settings.TestMode {
+		// Use a fast cooldown in test mode
 		generationCooldown = 10 * time.Second // 10 seconds in test mode
+	} else {
+		// Default production cooldown
+		generationCooldown = 15 * time.Minute // 15 minutes in production
 	}
 
 	return &DataManager{

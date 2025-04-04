@@ -65,11 +65,12 @@ func main() {
 
 	// Configure data collection intervals
 	collectionSettings := data.CollectionSettings{
-		WeatherInterval: conf.GetWeatherInterval(),
-		PriceInterval:   conf.GetPriceInterval(),
-		NewsInterval:    conf.GetNewsInterval(),
-		TestMode:        *testMode || conf.TestMode,
-		GeminiApiKey:    conf.GeminiAPIKey,
+		WeatherInterval:    conf.GetWeatherInterval(),
+		PriceInterval:      conf.GetPriceInterval(),
+		NewsInterval:       conf.GetNewsInterval(),
+		GenerationCooldown: conf.GetGenerationCooldown(),
+		TestMode:           *testMode || conf.TestMode,
+		GeminiApiKey:       conf.GeminiAPIKey,
 	}
 
 	// Create data manager
@@ -189,9 +190,10 @@ func printUsage() {
 	fmt.Println("  MONGO_DB              MongoDB database name")
 	fmt.Println("  MONGO_USER            MongoDB username")
 	fmt.Println("  MONGO_PASSWORD        MongoDB password")
-	fmt.Println("  WEATHER_INTERVAL      Weather collection interval in hours (default: 6)")
+	fmt.Println("  WEATHER_INTERVAL      Weather collection interval in hours (default: 3)")
 	fmt.Println("  PRICE_INTERVAL        Price collection interval in hours (default: 12)")
-	fmt.Println("  NEWS_INTERVAL         News collection interval in hours (default: 12)")
+	fmt.Println("  NEWS_INTERVAL         News collection interval in hours (default: 0.5)")
+	fmt.Println("  GENERATION_COOLDOWN   Minutes between fish generations (default: 15)")
 }
 
 // Helper function to mask API keys for display

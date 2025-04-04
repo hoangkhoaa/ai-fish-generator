@@ -26,9 +26,10 @@ type Config struct {
 	MongoPassword string
 
 	// Collection intervals (in hours)
-	WeatherInterval int
-	PriceInterval   int
-	NewsInterval    int
+	WeatherInterval    int
+	PriceInterval      int
+	NewsInterval       int
+	GenerationCooldown int // in minutes
 }
 
 // LoadEnv loads environment variables from a .env file
@@ -90,6 +91,11 @@ func NewConfig() *Config {
 		newsInterval = 12 // Default: collect news data every 12 hours
 	}
 
+	generationCooldown, _ := strconv.Atoi(os.Getenv("GENERATION_COOLDOWN"))
+	if generationCooldown <= 0 {
+		generationCooldown = 15 // Default: 15 minutes between fish generations
+	}
+
 	return &Config{
 		GeminiAPIKey:   os.Getenv("GEMINI_API_KEY"),
 		UseAI:          os.Getenv("USE_AI") == "true" || os.Getenv("USE_AI") == "1",
@@ -106,9 +112,10 @@ func NewConfig() *Config {
 		MongoPassword: os.Getenv("MONGO_PASSWORD"),
 
 		// Collection intervals
-		WeatherInterval: weatherInterval,
-		PriceInterval:   priceInterval,
-		NewsInterval:    newsInterval,
+		WeatherInterval:    weatherInterval,
+		PriceInterval:      priceInterval,
+		NewsInterval:       newsInterval,
+		GenerationCooldown: generationCooldown,
 	}
 }
 
@@ -125,6 +132,11 @@ func (c *Config) GetPriceInterval() time.Duration {
 // GetNewsInterval returns the news collection interval as a time.Duration
 func (c *Config) GetNewsInterval() time.Duration {
 	return time.Duration(c.NewsInterval) * time.Hour
+}
+
+// GetGenerationCooldown returns the fish generation cooldown as a time.Duration
+func (c *Config) GetGenerationCooldown() time.Duration {
+	return time.Duration(c.GenerationCooldown) * time.Minute
 }
 
 // GetMongoURI returns the complete MongoDB connection URI

@@ -60,15 +60,15 @@ USE_AI=true
 TEST_MODE=false
 
 # MongoDB Configuration
-MONGO_URI=mongodb://localhost:27017
+MONGO_URI=mongodb://localhost:27017/fish_generator
 MONGO_DB=fish_generator
 MONGO_USER=
 MONGO_PASSWORD=
 
 # Collection Intervals (in hours)
-WEATHER_INTERVAL=6
+WEATHER_INTERVAL=3
 PRICE_INTERVAL=12
-NEWS_INTERVAL=12
+NEWS_INTERVAL=0.5
 ```
 
 ### Running the Application
@@ -94,9 +94,9 @@ The application now has a simpler command structure:
 The application now supports MongoDB for data persistence. When MongoDB is configured, the application will:
 
 1. Store all generated fish with their properties
-2. Collect and store weather data every 6 hours (by default)
-3. Collect and store price data (BTC, gold, oil) every 12 hours
-4. Collect and store news headlines every 12 hours
+2. Collect and store weather data every 3 hours (by default)
+3. Collect and store price data (BTC, gold) every 12 hours
+4. Collect and store news headlines every 30 minutes
 5. Track collection statistics
 
 The stored data influences future fish generation, particularly for region-based fish. For example, fish generated in a region with stormy weather will have different characteristics than those in sunny regions.
@@ -130,6 +130,309 @@ Fish can affect various game statistics:
 - **Economic stats**: Sell value, market demand, bait cost
 - **Exploration stats**: Explore speed, area access, weather resistance
 - **Collection stats**: Storage space, preserve duration, collection bonus
+
+## License
+
+[MIT License](LICENSE)
+
+## Fish Characteristics
+
+Each generated fish has:
+
+- **Name**: A unique name for the species based on the data source
+- **Rarity**: Common, Uncommon, Rare, Epic, or Legendary
+- **Size**: Physical size in meters
+- **Value**: Market value in USD
+- **Description**: A short description of the fish's appearance and traits
+- **Effect**: A gameplay effect that relates to the real-world data
+- **Data Source**: Which data source influenced this fish's creation
+- **StatEffects**: Specific gameplay statistics affected by this fish
+
+## AI-Powered Fish Generation
+
+When enabled, the application uses Google's Gemini API to create more creative and unique fish based on news headlines. The AI analyzes the news content, sentiment, and category to generate fish with characteristics that reflect the news story in interesting ways.
+
+To use AI-powered fish generation:
+
+1. Obtain a Google Gemini API key from the [Google AI Studio](https://makersuite.google.com/)
+2. Set up your .env file with your API key and enable AI generation:
+   ```
+   GEMINI_API_KEY=your_api_key_here
+   USE_AI=true
+   ```
+
+The AI-generated fish are marked with "news-ai" as their data source and with the 🤖 emoji in reports.
+
+## Example Fish
+
+```json
+{
+  "name": "Thunderfin Shockray",
+  "rarity": "Epic",
+  "size": 2.5,
+  "value": 1000,
+  "description": "A rare fish found only in stormy weather conditions. It has the ability to generate electricity during thunderstorms.",
+  "effect": "Increases the player's chance of catching other rare fish during storms.",
+  "data_source": "weather",
+  "stat_effects": [
+    {
+      "stat": "CatchChance",
+      "value": 15,
+      "is_percentage": true,
+      "duration": 600
+    },
+    {
+      "stat": "WeatherResist",
+      "value": 20,
+      "is_percentage": true,
+      "duration": 1200
+    }
+  ]
+}
+```
+
+## Project Structure
+
+- `cmd/fish-generate`: Main application code
+- `internal/fish`: Fish model and generation logic
+- `internal/data`: Data collection interfaces and implementations
+- `internal/config`: Configuration and environment handling
+- `internal/storage`: Database storage implementations
+
+## Use in Games
+
+The generated fish can be used in fishing games where:
+
+- Players catch fish based on current real-world conditions
+- Each fish provides unique effects or bonuses
+- The rarity and value of available fish changes based on external factors
+
+This makes the game more dynamic and connected to real-world events!
+
+## API Endpoints
+
+The application exposes several RESTful API endpoints for fishing simulation:
+
+### `/api/fish`
+
+**Method**: GET
+
+**Description**: Attempt to catch a fish based on provided parameters
+
+**Parameters**:
+- `region_id` (optional): Specific region ID to fish in
+- `location` (optional): Location name (city, ocean, etc.)
+- `lat`, `lng` (optional): Coordinates for location-based fishing
+- `weather` (optional): Current weather condition
+- `temp` (optional): Current temperature
+- `skill` (optional): User's fishing skill level (1-100)
+- `bait` (optional): Type of bait used
+- `time` (optional): Time of day ("morning", "afternoon", "evening", "night")
+
+**Response Example**:
+```json
+{
+  "success": true,
+  "fish": {
+    "name": "Solarbeam Goldscale",
+    "description": "A bright golden fish that absorbs sunlight through its scales.",
+    "rarity": "Rare",
+    "size": 1.2,
+    "value": 450,
+    "effect": "Increases fishing luck by 10% for 30 minutes",
+    "data_source": "weather"
+  },
+  "message": "You caught a magnificent Rare fish!",
+  "rarity_factor": 0.75,
+  "conditions": {
+    "weather": "sunny",
+    "region": "Pacific Coast",
+    "region_tags": ["saltwater", "coastal"],
+    "time_of_day": "afternoon",
+    "quality": 7
+  },
+  "catch_time": "2023-06-15T14:23:45Z"
+}
+```
+
+### `/api/regions`
+
+**Method**: GET
+
+**Description**: Get a list of available fishing regions
+
+**Response Example**:
+```json
+[
+  {
+    "id": "pacific_coast",
+    "name": "Pacific Coast",
+    "description": "The western coastline with diverse marine life",
+    "tags": ["saltwater", "coastal", "cold"],
+    "fish_density": 8
+  },
+  {
+    "id": "mountain_lake",
+    "name": "Mountain Lake",
+    "description": "A pristine lake surrounded by mountains",
+    "tags": ["freshwater", "alpine", "clear"],
+    "fish_density": 6
+  }
+]
+```
+
+### `/api/conditions`
+
+**Method**: GET
+
+**Description**: Get current fishing conditions for a location
+
+**Parameters**:
+- `region_id` (optional): Region ID to get conditions for
+- `location` (optional): Location name
+
+**Response Example**:
+```json
+{
+  "weather": "partly cloudy",
+  "temperature": 22.5,
+  "wind_speed": 8.3,
+  "time_of_day": "afternoon",
+  "moon_phase": "full moon",
+  "quality": 7,
+  "region": "Pacific Coast",
+  "best_baits": ["silver spinner", "crab lure"]
+}
+```
+
+### Health Check
+
+**Endpoint**: `/health`
+
+**Method**: GET
+
+**Description**: Check if the API is running
+
+**Response Example**:
+```json
+{
+  "status": "ok"
+}
+```
+
+# Fish Generate Service
+
+This service generates unique fish species influenced by real-time data from various sources, using AI to create detailed fish descriptions.
+
+## Overview
+
+Fish Generator creates fish with different characteristics based on real-world data from various sources:
+
+- Weather conditions (via OpenWeatherMap API)
+- Cryptocurrency prices (via Bitcoin pricing)
+- News headlines (via NewsAPI)
+- Gold prices (via Metal Price API)
+
+Each data source influences different aspects of the generated fish, such as rarity, size, weight, value, and special effects.
+
+## Features
+
+- Real-time data collection from various APIs
+- AI-powered fish generation using Google Gemini
+- MongoDB integration for data persistence 
+- Ocean region-based data collection
+- Category-based news pairing for thematic fish generation
+- Configurable test and production modes
+- MongoDB state persistence for crash recovery
+
+## Getting Started
+
+### Prerequisites
+
+- Go 1.23 or higher
+- MongoDB (for data persistence)
+- API keys for:
+  - Google Gemini (for AI-generated fish)
+  - OpenWeatherMap (for weather data)
+  - NewsAPI (for news headlines)
+  - Metal Price API (for gold price data)
+
+### Installation
+
+#### Local Development
+1. Clone the repository
+2. Create a `.env` file with your API keys and configuration
+3. Run `go build -o fish-generate cmd/fish-generate/main.go`
+4. Execute `./fish-generate`
+
+#### Docker Deployment
+1. Clone the repository
+2. Create a `.env` file with your API keys
+3. Run `./deploy-staging.sh` to deploy with Docker Compose
+
+### Configuration
+
+Create a `.env` file in the project root:
+
+```
+# API Keys
+GEMINI_API_KEY=your_gemini_api_key
+OPENWEATHER_API_KEY=your_openweather_api_key
+NEWSAPI_KEY=your_newsapi_key
+METALPRICE_API_KEY=your_metalprice_api_key
+
+# Feature Toggles
+USE_AI=true
+TEST_MODE=false
+
+# MongoDB Configuration
+MONGO_URI=mongodb://fishuser:yourpassword@mongodb:27017/fish_generator?authSource=admin
+MONGO_DB=fish_generator
+
+# Collection Intervals (in hours)
+WEATHER_INTERVAL=3
+PRICE_INTERVAL=12
+NEWS_INTERVAL=0.5
+```
+
+## MongoDB Integration
+
+The application supports MongoDB for data persistence. When MongoDB is configured, the application:
+
+1. Stores all generated fish with their properties
+2. Collects and stores weather data every 3 hours (by default)
+3. Collects and stores price data (BTC, gold) every 12 hours
+4. Collects and stores news headlines every 30 minutes
+5. Tracks which news items have been used
+6. Persists the generation queue for crash recovery
+
+## Fish Generation Logic
+
+The service generates unique fish based on real-world data with these characteristics:
+
+1. **Rarity Distribution**: Common (50%), Uncommon (25%), Rare (15%), Epic (8%), Legendary (2%)
+2. **Catch Chance**: Varies by rarity from 80-95% for Common to 5-15% for Legendary
+3. **Size Range**: From Tiny (1-5cm) to Massive (10-25m)
+4. **Weight Calculation**: Based on the cube of the length with realistic variation factor
+5. **Value Calculation**: Based on size and rarity multiplier
+
+The service uses the Google Gemini AI API to generate creative fish descriptions, appearances, and origins based on news context.
+
+## News Categorization
+
+The system categorizes news items and pairs news in the same category to create thematically consistent fish. When two news items in the same category are available, they're merged to provide richer context for fish generation.
+
+## Ocean Regions
+
+The application defines several ocean regions, each with specific characteristics:
+
+- **North Atlantic**: Cold, deep waters with diverse marine life
+- **Tropical Pacific**: Warm, clear waters with vibrant coral reefs
+- **Mediterranean Sea**: Warm, saltier waters with rich history and biodiversity
+- **Arctic Ocean**: Extremely cold waters with unique ice-adapted species
+- **South Pacific**: Pristine waters with diverse island ecosystems
+
+Each region's weather conditions influence the generated fish.
 
 ## License
 
