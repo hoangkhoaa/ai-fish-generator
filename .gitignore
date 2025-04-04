@@ -1,0 +1,46 @@
+# Environment variables
+.env
+
+# Built binaries
+fish-generate
+/bin/
+/build/
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/vendor/
+
+# Log files
+/logs/
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE/Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# MongoDB local data (if using local development MongoDB)
+/data/db/
+
+# Docker related
+.dockerignore
+
+# Temporary files
+/tmp/ 
