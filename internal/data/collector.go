@@ -98,6 +98,7 @@ type OilPrice struct {
 // NewsItem represents a news headline or article
 type NewsItem struct {
 	Headline    string    `json:"headline"`
+	Content     string    `json:"content"` // News article content
 	Source      string    `json:"source"`
 	URL         string    `json:"url"`
 	Category    string    `json:"category"`
@@ -111,9 +112,9 @@ func (n *NewsItem) GetHeadline() string {
 	return n.Headline
 }
 
-// GetContent returns the news content (not available in this implementation)
+// GetContent returns the news content
 func (n *NewsItem) GetContent() string {
-	return "" // Not provided by our implementation
+	return n.Content // Return actual content field value
 }
 
 // GetSource returns the news source

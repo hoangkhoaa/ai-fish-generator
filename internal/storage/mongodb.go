@@ -17,14 +17,15 @@ import (
 
 // Define collection names
 const (
-	weatherCollection  = "weather"
-	priceCollection    = "prices"
-	newsCollection     = "news"
-	fishCollection     = "fish"
-	regionCollection   = "regions"
-	statsCollection    = "stats"
-	usedNewsCollection = "used_news"
-	queueCollection    = "generation_queue"
+	weatherCollection    = "weather"
+	priceCollection      = "prices"
+	newsCollection       = "news"
+	fishCollection       = "fish"
+	regionCollection     = "regions"
+	statsCollection      = "stats"
+	usedNewsCollection   = "used_news"
+	queueCollection      = "generation_queue"
+	translatedCollection = "translated_fish" // New collection for translated fish
 )
 
 // WeatherData represents a weather data document in MongoDB
@@ -131,6 +132,23 @@ type QueuedGenerationRecord struct {
 	RecordType string             `bson:"record_type"`
 }
 
+// TranslatedFishData represents a translated fish document in MongoDB
+type TranslatedFishData struct {
+	ID              primitive.ObjectID `bson:"_id,omitempty"`
+	OriginalID      primitive.ObjectID `bson:"original_id"` // Reference to original fish
+	Name            string             `bson:"name"`
+	Description     string             `bson:"description"`
+	Appearance      string             `bson:"appearance"`
+	Color           string             `bson:"color"`
+	Diet            string             `bson:"diet"`
+	Habitat         string             `bson:"habitat"`
+	Effect          string             `bson:"effect"`
+	FavoriteWeather string             `bson:"favorite_weather"`
+	ExistenceReason string             `bson:"existence_reason"`
+	TranslatedAt    time.Time          `bson:"translated_at"`
+	Language        string             `bson:"language"` // e.g., "vi" for Vietnamese
+}
+
 // MongoDB implements database operations using MongoDB
 type MongoDB struct {
 	client    *mongo.Client
@@ -195,6 +213,7 @@ func (m *MongoDB) initializeCollections(ctx context.Context) error {
 		statsCollection,
 		usedNewsCollection,
 		queueCollection,
+		translatedCollection, // Add translated fish collection
 	}
 
 	existingCollections := make(map[string]bool)
@@ -237,31 +256,8 @@ func (m *MongoDB) createIndexesForCollection(ctx context.Context, collectionName
 		})
 		return err
 
-	case fishCollection:
-		// Index for fish by rarity and data_source
-		_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
-			{
-				Keys: bson.D{
-					{Key: "rarity", Value: 1},
-					{Key: "data_source", Value: 1},
-				},
-			},
-			{
-				Keys: bson.D{{Key: "region_id", Value: 1}},
-			},
-		})
-		return err
-
-	case statsCollection:
-		// Index for the fish limit counts by date
-		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
-			Keys:    bson.D{{Key: "date", Value: 1}, {Key: "record_type", Value: 1}},
-			Options: options.Index().SetUnique(true),
-		})
-		return err
-
 	case priceCollection:
-		// Index for price data by asset type and timestamp
+		// Index on asset_type, timestamp for faster price queries
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "asset_type", Value: 1},
@@ -271,17 +267,46 @@ func (m *MongoDB) createIndexesForCollection(ctx context.Context, collectionName
 		return err
 
 	case newsCollection:
-		// Index for news by timestamp and sentiment
+		// Index on headline to check for duplicates and search
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
-				{Key: "published_at", Value: -1},
-				{Key: "sentiment", Value: -1},
+				{Key: "headline", Value: 1},
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		// Index on timestamp for recent news queries
+		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "timestamp", Value: -1},
+			},
+		})
+		return err
+
+	case fishCollection:
+		// Index on generation_time and region_id for faster fish queries
+		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "generated_at", Value: -1},
+				{Key: "region_id", Value: 1},
+			},
+		})
+		return err
+
+	case statsCollection:
+		// Compound index on collection_name and date
+		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "collection_name", Value: 1},
+				{Key: "date", Value: 1},
 			},
 		})
 		return err
 
 	case usedNewsCollection:
-		// Index for used news IDs
+		// Simple index on news_id
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "news_id", Value: 1},
@@ -291,11 +316,31 @@ func (m *MongoDB) createIndexesForCollection(ctx context.Context, collectionName
 		return err
 
 	case queueCollection:
-		// Index for generation queue by added_at
+		// Index on added_at and status for processing queue
 		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
 			Keys: bson.D{
 				{Key: "added_at", Value: 1},
 				{Key: "status", Value: 1},
+			},
+		})
+		return err
+
+	case translatedCollection:
+		// Index on original_id for fast lookups
+		_, err := collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "original_id", Value: 1},
+			},
+			Options: options.Index().SetUnique(true),
+		})
+		if err != nil {
+			return err
+		}
+
+		// Index on translated_at for querying recent translations
+		_, err = collection.Indexes().CreateOne(ctx, mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "translated_at", Value: -1},
 			},
 		})
 		return err
@@ -321,56 +366,24 @@ func (m *MongoDB) Close(ctx context.Context) error {
 	return nil
 }
 
-// SaveWeatherData saves or updates weather data in MongoDB
-func (m *MongoDB) SaveWeatherData(ctx context.Context, weatherInfo interface{}, regionID, cityID string) error {
+// SaveWeatherData saves weather data to MongoDB
+func (m *MongoDB) SaveWeatherData(ctx context.Context, weatherInfo *data.WeatherInfo, regionID, cityID string) error {
 	collection := m.client.Database(m.database).Collection(weatherCollection)
 
-	// Convert weatherInfo to correct type
-	wi, ok := weatherInfo.(*WeatherData)
-	if !ok {
-		// Handle the case where the input is a different type
-		// For example, if it's a *data.WeatherInfo
-		info, ok := weatherInfo.(interface {
-			GetCondition() string
-			GetTempC() float64
-			GetHumidity() float64
-			GetWindSpeed() float64
-			GetRainMM() float64
-			GetPressure() float64
-			GetClouds() int
-			GetDescription() string
-			GetSource() string
-		})
-
-		if !ok {
-			return fmt.Errorf("invalid weather info type")
-		}
-
-		wi = &WeatherData{
-			RegionID:    regionID,
-			CityID:      cityID,
-			Condition:   info.GetCondition(),
-			TempC:       info.GetTempC(),
-			Humidity:    info.GetHumidity(),
-			WindSpeed:   info.GetWindSpeed(),
-			RainMM:      info.GetRainMM(),
-			Pressure:    info.GetPressure(),
-			Clouds:      info.GetClouds(),
-			Description: info.GetDescription(),
-			Timestamp:   time.Now(),
-			Source:      info.GetSource(),
-		}
-	}
-
-	// Set the timestamp and region ID, city ID if not already set
-	if wi.Timestamp.IsZero() {
-		wi.Timestamp = time.Now()
-	}
-	if wi.RegionID == "" {
-		wi.RegionID = regionID
-	}
-	if wi.CityID == "" {
-		wi.CityID = cityID
+	// Convert weatherInfo to WeatherData
+	wi := WeatherData{
+		RegionID:    regionID,
+		CityID:      cityID,
+		Condition:   weatherInfo.Condition,
+		TempC:       weatherInfo.TempC,
+		Humidity:    0,  // Not available in basic WeatherInfo
+		WindSpeed:   0,  // Not available in basic WeatherInfo
+		RainMM:      0,  // Not available in basic WeatherInfo
+		Pressure:    0,  // Not available in basic WeatherInfo
+		Clouds:      0,  // Not available in basic WeatherInfo
+		Description: "", // Not available in basic WeatherInfo
+		Timestamp:   time.Now(),
+		Source:      "internal", // Default source
 	}
 
 	// Create filter for upsert operation
@@ -431,46 +444,19 @@ func truncateString(s string, maxLen int) string {
 }
 
 // SaveNewsData saves news data to MongoDB
-func (m *MongoDB) SaveNewsData(ctx context.Context, newsItem interface{}) error {
+func (m *MongoDB) SaveNewsData(ctx context.Context, newsItem *data.NewsItem) error {
 	collection := m.client.Database(m.database).Collection(newsCollection)
 
-	// Convert newsItem to correct type or create new document
-	var newsData NewsData
-
-	ni, ok := newsItem.(*NewsData)
-	if ok {
-		newsData = *ni
-	} else {
-		// Try to convert from another news item type
-		info, ok := newsItem.(interface {
-			GetHeadline() string
-			GetContent() string
-			GetSource() string
-			GetURL() string
-			GetPublishedAt() time.Time
-			GetSentiment() float64
-			GetKeywords() []string
-		})
-
-		if !ok {
-			return fmt.Errorf("invalid news item type")
-		}
-
-		newsData = NewsData{
-			Headline:    info.GetHeadline(),
-			Content:     info.GetContent(),
-			Source:      info.GetSource(),
-			URL:         info.GetURL(),
-			PublishedAt: info.GetPublishedAt(),
-			Sentiment:   info.GetSentiment(),
-			Keywords:    info.GetKeywords(),
-			Timestamp:   time.Now(),
-		}
-	}
-
-	// Set the timestamp if not already set
-	if newsData.Timestamp.IsZero() {
-		newsData.Timestamp = time.Now()
+	// Convert newsItem to NewsData
+	newsData := NewsData{
+		Headline:    newsItem.Headline,
+		Content:     newsItem.GetContent(),
+		Source:      newsItem.Source,
+		URL:         newsItem.URL,
+		PublishedAt: newsItem.PublishedAt,
+		Sentiment:   newsItem.Sentiment,
+		Keywords:    newsItem.Keywords,
+		Timestamp:   time.Now(),
 	}
 
 	// Create filter for upsert operation - use composite key of source+headline
@@ -1060,6 +1046,186 @@ func (m *MongoDB) GetGenerationQueue(ctx context.Context) ([]data.GenerationRequ
 			AddedAt: record.AddedAt,
 			// Note: Ctx will be attached by the caller
 		})
+	}
+
+	return result, nil
+}
+
+// SaveTranslatedFish saves the translated fish data to MongoDB
+func (m *MongoDB) SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error {
+	collection := m.client.Database(m.database).Collection(translatedCollection)
+
+	// Convert string ID to ObjectID
+	originalID, err := primitive.ObjectIDFromHex(translatedFish.OriginalID)
+	if err != nil {
+		return fmt.Errorf("invalid original fish ID: %v", err)
+	}
+
+	// Create the document
+	doc := TranslatedFishData{
+		OriginalID:      originalID,
+		Name:            translatedFish.Name,
+		Description:     translatedFish.Description,
+		Appearance:      translatedFish.Appearance,
+		Color:           translatedFish.Color,
+		Diet:            translatedFish.Diet,
+		Habitat:         translatedFish.Habitat,
+		Effect:          translatedFish.Effect,
+		FavoriteWeather: translatedFish.FavoriteWeather,
+		ExistenceReason: translatedFish.ExistenceReason,
+		TranslatedAt:    translatedFish.TranslatedAt,
+		Language:        "vi", // Vietnamese language code
+	}
+
+	// Filter for upsert based on original fish ID
+	filter := bson.M{
+		"original_id": originalID,
+		"language":    "vi",
+	}
+
+	// Set up upsert options
+	opts := options.FindOneAndReplace().SetUpsert(true).SetReturnDocument(options.After)
+
+	// Perform upsert operation
+	var result TranslatedFishData
+	err = collection.FindOneAndReplace(ctx, filter, doc, opts).Decode(&result)
+	if err != nil && err != mongo.ErrNoDocuments {
+		return fmt.Errorf("failed to save translated fish: %v", err)
+	}
+
+	log.Printf("Saved translated fish for original ID: %s", translatedFish.OriginalID)
+	return nil
+}
+
+// GetTranslatedFish retrieves a translated fish by original ID
+func (m *MongoDB) GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error) {
+	collection := m.client.Database(m.database).Collection(translatedCollection)
+
+	// Convert string ID to ObjectID
+	objID, err := primitive.ObjectIDFromHex(originalID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid original fish ID: %v", err)
+	}
+
+	// Create filter
+	filter := bson.M{
+		"original_id": objID,
+		"language":    "vi",
+	}
+
+	// Perform query
+	var result TranslatedFishData
+	err = collection.FindOne(ctx, filter).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil // No translation found
+		}
+		return nil, fmt.Errorf("failed to retrieve translated fish: %v", err)
+	}
+
+	// Convert to TranslatedFish type
+	translatedFish := &data.TranslatedFish{
+		OriginalID:      originalID,
+		Name:            result.Name,
+		Description:     result.Description,
+		Appearance:      result.Appearance,
+		Color:           result.Color,
+		Diet:            result.Diet,
+		Habitat:         result.Habitat,
+		Effect:          result.Effect,
+		FavoriteWeather: result.FavoriteWeather,
+		ExistenceReason: result.ExistenceReason,
+		TranslatedAt:    result.TranslatedAt,
+	}
+
+	return translatedFish, nil
+}
+
+// GetUntranslatedFishIDs retrieves IDs of fish that haven't been translated yet
+func (m *MongoDB) GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error) {
+	// Get all fish IDs
+	fishColl := m.client.Database(m.database).Collection(fishCollection)
+	translatedColl := m.client.Database(m.database).Collection(translatedCollection)
+
+	// Find all fish, sort by newest first
+	fishCursor, err := fishColl.Find(ctx, bson.M{},
+		options.Find().SetSort(bson.M{"generated_at": -1}).SetProjection(bson.M{"_id": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query fish collection: %v", err)
+	}
+	defer fishCursor.Close(ctx)
+
+	// Get all translated fish ids
+	translatedCursor, err := translatedColl.Find(ctx, bson.M{},
+		options.Find().SetProjection(bson.M{"original_id": 1}))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query translated fish collection: %v", err)
+	}
+	defer translatedCursor.Close(ctx)
+
+	// Create a map of translated fish IDs
+	translatedIDs := make(map[string]bool)
+	var translatedDoc struct {
+		OriginalID primitive.ObjectID `bson:"original_id"`
+	}
+
+	for translatedCursor.Next(ctx) {
+		if err := translatedCursor.Decode(&translatedDoc); err != nil {
+			return nil, fmt.Errorf("failed to decode translated fish document: %v", err)
+		}
+		translatedIDs[translatedDoc.OriginalID.Hex()] = true
+	}
+
+	// Find fish that are not translated
+	var fishDoc struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+
+	untranslatedIDs := make([]string, 0, limit)
+	for fishCursor.Next(ctx) {
+		if err := fishCursor.Decode(&fishDoc); err != nil {
+			return nil, fmt.Errorf("failed to decode fish document: %v", err)
+		}
+
+		// Check if this fish has been translated
+		fishIDStr := fishDoc.ID.Hex()
+		if !translatedIDs[fishIDStr] {
+			untranslatedIDs = append(untranslatedIDs, fishIDStr)
+			if len(untranslatedIDs) >= limit {
+				break
+			}
+		}
+	}
+
+	return untranslatedIDs, nil
+}
+
+// GetFishByID retrieves a fish by its ID
+func (m *MongoDB) GetFishByID(ctx context.Context, id string) (map[string]interface{}, error) {
+	collection := m.client.Database(m.database).Collection(fishCollection)
+
+	// Convert string ID to ObjectID
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid fish ID: %v", err)
+	}
+
+	// Create filter
+	filter := bson.M{"_id": objID}
+
+	// Perform query
+	var result bson.M
+	err = collection.FindOne(ctx, filter).Decode(&result)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("fish not found: %s", id)
+		}
+		return nil, fmt.Errorf("failed to retrieve fish: %v", err)
+	}
+
+	// Convert primitive.ObjectID fields to strings for easier handling
+	if id, ok := result["_id"].(primitive.ObjectID); ok {
+		result["_id"] = id.Hex()
 	}
 
 	return result, nil

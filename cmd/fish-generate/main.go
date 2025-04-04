@@ -93,18 +93,6 @@ func main() {
 		TestMode:     *testMode || conf.TestMode,
 	}
 
-	// Create storage wrapper for the fish service
-	var fishStorageAdapter fish.StorageAdapter
-	if storageAdapter != nil {
-		wrapper, err := fish.NewStorageWrapper(storageAdapter)
-		if err != nil {
-			log.Printf("Warning: could not create storage wrapper: %v", err)
-		} else {
-			fishStorageAdapter = wrapper
-			serviceOpts.StorageAdapter = fishStorageAdapter
-		}
-	}
-
 	// Create the fish service
 	fishService := fish.NewService(dataManager.GetCollectors(), serviceOpts)
 
@@ -129,6 +117,28 @@ func main() {
 	} else {
 		log.Println("Running fish generation service in production mode")
 		go fishGenService.Run(ctx)
+	}
+
+	// Initialize translation service if storage is available
+	if storageAdapter != nil {
+		// Load translation settings
+		translationSettings := data.LoadTranslationSettings()
+		if translationSettings.Enabled {
+			log.Println("Initializing translation service")
+			translationManager := data.NewTranslationManager(translationSettings, storageAdapter)
+
+			// Start translation service
+			if err := translationManager.Start(ctx); err != nil {
+				log.Printf("Error starting translation service: %v", err)
+			} else {
+				log.Printf("Translation service started with interval: %v", translationSettings.Interval)
+
+				// Make sure to stop the translation service on shutdown
+				defer translationManager.Stop()
+			}
+		} else {
+			log.Println("Translation service is disabled. Set ENABLE_TRANSLATION=1 to enable")
+		}
 	}
 
 	// Initialize and start the API server

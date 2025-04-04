@@ -3,23 +3,44 @@ package storage
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
-	"time"
 
 	"fish-generate/internal/data"
 	"fish-generate/internal/fish"
 )
 
-// MongoDBAdapter adapts MongoDB to DatabaseClient interface
-type MongoDBAdapter struct {
-	db *MongoDB
+// DatabaseClient defines the interface for MongoDB operations
+type DatabaseClient interface {
+	SaveWeatherData(ctx context.Context, weatherInfo *data.WeatherInfo, regionID, cityID string) error
+	SavePriceData(ctx context.Context, assetType string, price, volume, changePercent, volumeChange float64, source string) error
+	SaveNewsData(ctx context.Context, newsItem *data.NewsItem) error
+	SaveFishData(ctx context.Context, fishData interface{}) error
+	GetRecentWeatherData(ctx context.Context, regionID string, limit int) ([]*WeatherData, error)
+	GetRecentPriceData(ctx context.Context, assetType string, limit int) ([]map[string]interface{}, error)
+	GetRecentNewsData(ctx context.Context, limit int) ([]*NewsData, error)
+	GetFishByRegion(ctx context.Context, regionID string, limit int) ([]*FishData, error)
+	GetFishByDataSource(ctx context.Context, dataSource string, limit int) ([]*FishData, error)
+	SaveUsedNewsIDs(ctx context.Context, usedIDs map[string]bool) error
+	GetUsedNewsIDs(ctx context.Context) (map[string]bool, error)
+	SaveGenerationQueue(ctx context.Context, queue []data.GenerationRequest) error
+	GetGenerationQueue(ctx context.Context) ([]data.GenerationRequest, error)
+	GetDailyFishCount(ctx context.Context) (int, error)
+	GetSimilarFish(ctx context.Context, dataSource string, rarityLevel string) (*FishData, error)
+	GetFishByID(ctx context.Context, id string) (map[string]interface{}, error)
+	SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error
+	GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error)
+	GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error)
 }
 
-// NewMongoDBAdapter creates a new adapter for MongoDB
-func NewMongoDBAdapter(db *MongoDB) *MongoDBAdapter {
-	return &MongoDBAdapter{
-		db: db,
-	}
+// MongoDBAdapter adapts the MongoDB interface to the internal data interfaces
+type MongoDBAdapter struct {
+	db DatabaseClient
+}
+
+// NewMongoDBAdapter creates a new MongoDB adapter
+func NewMongoDBAdapter(db DatabaseClient) *MongoDBAdapter {
+	return &MongoDBAdapter{db: db}
 }
 
 // SaveWeatherData saves weather data to MongoDB
@@ -38,157 +59,224 @@ func (a *MongoDBAdapter) SaveNewsData(ctx context.Context, newsItem *data.NewsIt
 }
 
 // SaveFishData saves fish data to MongoDB
-func (a *MongoDBAdapter) SaveFishData(ctx context.Context, fishItem interface{}) error {
-	// Try to convert from fish.Fish type
-	if fishObj, ok := fishItem.(*fish.Fish); ok {
-		// Convert fish to FishData
-		fishData := &FishData{
-			Name:             fishObj.Name,
-			Description:      fishObj.Description,
-			Rarity:           string(fishObj.Rarity),
-			Length:           fishObj.Size,
-			Weight:           fishObj.Size * 2.5, // Approximation
-			Color:            extractColorFromDescription(fishObj.Description),
-			Habitat:          extractHabitatFromDescription(fishObj.Description),
-			Diet:             extractDietFromDescription(fishObj.Description),
-			GeneratedAt:      time.Now(),
-			IsAIGenerated:    fishObj.IsAIGenerated,
-			DataSource:       fishObj.DataSource,
-			StatEffects:      convertStatEffects(fishObj.StatEffects),
-			GenerationReason: fishObj.GenerationReason,
-		}
-
-		return a.db.SaveFishData(ctx, fishData)
-	}
-
-	// If it's already a map, pass it directly
-	if fishMap, ok := fishItem.(map[string]interface{}); ok {
-		// Try to extract color, habitat, and diet from description if present
-		if desc, hasDesc := fishMap["description"].(string); hasDesc {
-			if _, hasColor := fishMap["color"]; !hasColor {
-				fishMap["color"] = extractColorFromDescription(desc)
-			}
-			if _, hasHabitat := fishMap["habitat"]; !hasHabitat {
-				fishMap["habitat"] = extractHabitatFromDescription(desc)
-			}
-			if _, hasDiet := fishMap["diet"]; !hasDiet {
-				fishMap["diet"] = extractDietFromDescription(desc)
-			}
-		}
-
-		// Set generation time if not already set
-		if _, hasTime := fishMap["generated_at"]; !hasTime {
-			fishMap["generated_at"] = time.Now()
-		}
-
-		return a.db.SaveFishData(ctx, fishMap)
-	}
-
-	// For any other type, pass it to the DB which will handle conversion
-	return a.db.SaveFishData(ctx, fishItem)
+func (a *MongoDBAdapter) SaveFishData(ctx context.Context, fishData interface{}) error {
+	return a.db.SaveFishData(ctx, fishData)
 }
 
-// GetDailyFishCount retrieves the number of fish generated today
-func (a *MongoDBAdapter) GetDailyFishCount(ctx context.Context) (int, error) {
-	return a.db.GetDailyFishCount(ctx)
-}
-
-// GetSimilarFish retrieves a similar fish from the database
-func (a *MongoDBAdapter) GetSimilarFish(ctx context.Context, dataSource string, rarityLevel string) (*fish.Fish, error) {
-	fishData, err := a.db.GetSimilarFish(ctx, dataSource, rarityLevel)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to fish.Fish
-	return convertToFish(fishData), nil
-}
-
-// GetFishByRegion retrieves fish for a specific region
-func (a *MongoDBAdapter) GetFishByRegion(ctx context.Context, regionID string, limit int) ([]*fish.Fish, error) {
-	fishDataList, err := a.db.GetFishByRegion(ctx, regionID, limit)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to []*fish.Fish
-	result := make([]*fish.Fish, len(fishDataList))
-	for i, fishData := range fishDataList {
-		result[i] = convertToFish(fishData)
-	}
-
-	return result, nil
-}
-
-// GetFishByDataSource retrieves fish from a specific data source
-func (a *MongoDBAdapter) GetFishByDataSource(ctx context.Context, dataSource string, limit int) ([]*fish.Fish, error) {
-	fishDataList, err := a.db.GetFishByDataSource(ctx, dataSource, limit)
-	if err != nil {
-		return nil, err
-	}
-
-	// Convert to []*fish.Fish
-	result := make([]*fish.Fish, len(fishDataList))
-	for i, fishData := range fishDataList {
-		result[i] = convertToFish(fishData)
-	}
-
-	return result, nil
-}
-
-// GetRecentWeatherData retrieves recent weather data for a specific region
+// GetRecentWeatherData retrieves recent weather data from MongoDB
 func (a *MongoDBAdapter) GetRecentWeatherData(ctx context.Context, regionID string, limit int) ([]*data.WeatherInfo, error) {
 	mongoData, err := a.db.GetRecentWeatherData(ctx, regionID, limit)
 	if err != nil {
 		return nil, err
 	}
 
+	// Convert from MongoDB type to internal type
 	result := make([]*data.WeatherInfo, len(mongoData))
-	for i, data := range mongoData {
-		result[i] = convertToWeatherInfo(data)
+	for i, item := range mongoData {
+		result[i] = &data.WeatherInfo{
+			Condition: item.Condition,
+			TempC:     item.TempC,
+			IsExtreme: item.TempC > 35 || item.TempC < -5, // Simple extreme weather detection
+		}
 	}
-
 	return result, nil
 }
 
-// GetRecentPriceData retrieves recent price data for a specific asset type
+// GetRecentPriceData retrieves recent price data from MongoDB
 func (a *MongoDBAdapter) GetRecentPriceData(ctx context.Context, assetType string, limit int) ([]map[string]interface{}, error) {
 	return a.db.GetRecentPriceData(ctx, assetType, limit)
 }
 
-// GetRecentNewsData retrieves recent news data
+// GetRecentNewsData retrieves recent news data from MongoDB
 func (a *MongoDBAdapter) GetRecentNewsData(ctx context.Context, limit int) ([]*data.NewsItem, error) {
 	mongoData, err := a.db.GetRecentNewsData(ctx, limit)
 	if err != nil {
 		return nil, err
 	}
 
+	// Convert from MongoDB type to internal type
 	result := make([]*data.NewsItem, len(mongoData))
-	for i, data := range mongoData {
-		result[i] = convertToNewsItem(data)
-	}
+	for i, item := range mongoData {
+		// Create a basic NewsItem with required fields
+		newsItem := &data.NewsItem{
+			Headline:    item.Headline,
+			Source:      item.Source,
+			URL:         item.URL,
+			PublishedAt: item.PublishedAt,
+			Sentiment:   item.Sentiment,
+			Keywords:    item.Keywords,
+		}
 
+		// Add category if available
+		if category, ok := extractCategory(item); ok {
+			newsItem.Category = category
+		}
+
+		result[i] = newsItem
+	}
 	return result, nil
 }
 
-// SaveUsedNewsIDs saves a map of used news IDs to the database
+// Helper function to extract category from MongoDB NewsData
+func extractCategory(item *NewsData) (string, bool) {
+	// Category might be stored in different ways - check a few options
+	// First, try a direct "category" field
+	if category, exists := getStringField(item, "category"); exists {
+		return category, true
+	}
+
+	// Try to extract from keywords if available
+	categories := []string{"business", "technology", "sports", "entertainment", "health",
+		"science", "world", "politics", "economy", "environment"}
+
+	for _, keyword := range item.Keywords {
+		lowerKeyword := strings.ToLower(keyword)
+		for _, category := range categories {
+			if lowerKeyword == category {
+				return category, true
+			}
+		}
+	}
+
+	// Default category
+	return "general", true
+}
+
+// Helper to safely extract a string field from a struct using reflection
+func getStringField(item interface{}, fieldName string) (string, bool) {
+	value := reflect.ValueOf(item)
+	if value.Kind() == reflect.Ptr {
+		value = value.Elem()
+	}
+
+	if value.Kind() != reflect.Struct {
+		return "", false
+	}
+
+	field := value.FieldByName(fieldName)
+	if !field.IsValid() {
+		return "", false
+	}
+
+	if field.Kind() == reflect.String {
+		return field.String(), true
+	}
+
+	return "", false
+}
+
+// GetFishByRegion retrieves fish by region ID
+func (a *MongoDBAdapter) GetFishByRegion(ctx context.Context, regionID string, limit int) ([]*fish.Fish, error) {
+	mongoData, err := a.db.GetFishByRegion(ctx, regionID, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert from MongoDB type to internal type
+	result := make([]*fish.Fish, len(mongoData))
+	for i, item := range mongoData {
+		result[i] = &fish.Fish{
+			Name:             item.Name,
+			Rarity:           fish.Rarity(item.Rarity),
+			Size:             item.Length,
+			Value:            float64(item.Weight * 10), // Approximation
+			Description:      item.Description,
+			DataSource:       item.DataSource,
+			IsAIGenerated:    item.IsAIGenerated,
+			GenerationReason: item.GenerationReason,
+		}
+	}
+	return result, nil
+}
+
+// GetFishByDataSource retrieves fish by data source
+func (a *MongoDBAdapter) GetFishByDataSource(ctx context.Context, dataSource string, limit int) ([]*fish.Fish, error) {
+	mongoData, err := a.db.GetFishByDataSource(ctx, dataSource, limit)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert from MongoDB type to internal type
+	result := make([]*fish.Fish, len(mongoData))
+	for i, item := range mongoData {
+		result[i] = &fish.Fish{
+			Name:             item.Name,
+			Rarity:           fish.Rarity(item.Rarity),
+			Size:             item.Length,
+			Value:            float64(item.Weight * 10), // Approximation
+			Description:      item.Description,
+			DataSource:       item.DataSource,
+			IsAIGenerated:    item.IsAIGenerated,
+			GenerationReason: item.GenerationReason,
+		}
+	}
+	return result, nil
+}
+
+// SaveUsedNewsIDs saves used news IDs to MongoDB
 func (a *MongoDBAdapter) SaveUsedNewsIDs(ctx context.Context, usedIDs map[string]bool) error {
 	return a.db.SaveUsedNewsIDs(ctx, usedIDs)
 }
 
-// GetUsedNewsIDs retrieves all used news IDs from the database
+// GetUsedNewsIDs retrieves used news IDs from MongoDB
 func (a *MongoDBAdapter) GetUsedNewsIDs(ctx context.Context) (map[string]bool, error) {
 	return a.db.GetUsedNewsIDs(ctx)
 }
 
-// SaveGenerationQueue saves the current generation queue to the database
+// SaveGenerationQueue saves the generation queue to MongoDB
 func (a *MongoDBAdapter) SaveGenerationQueue(ctx context.Context, queue []data.GenerationRequest) error {
 	return a.db.SaveGenerationQueue(ctx, queue)
 }
 
-// GetGenerationQueue retrieves the pending generation requests from the database
+// GetGenerationQueue retrieves the generation queue from MongoDB
 func (a *MongoDBAdapter) GetGenerationQueue(ctx context.Context) ([]data.GenerationRequest, error) {
 	return a.db.GetGenerationQueue(ctx)
+}
+
+// GetDailyFishCount retrieves the count of fish generated today
+func (a *MongoDBAdapter) GetDailyFishCount(ctx context.Context) (int, error) {
+	return a.db.GetDailyFishCount(ctx)
+}
+
+// GetSimilarFish retrieves a similar fish from MongoDB
+func (a *MongoDBAdapter) GetSimilarFish(ctx context.Context, dataSource string, rarityLevel string) (*fish.Fish, error) {
+	mongoData, err := a.db.GetSimilarFish(ctx, dataSource, rarityLevel)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert from MongoDB type to internal type
+	result := &fish.Fish{
+		Name:             mongoData.Name,
+		Rarity:           fish.Rarity(mongoData.Rarity),
+		Size:             mongoData.Length,
+		Value:            float64(mongoData.Weight * 10), // Approximation
+		Description:      mongoData.Description,
+		DataSource:       mongoData.DataSource,
+		IsAIGenerated:    mongoData.IsAIGenerated,
+		GenerationReason: mongoData.GenerationReason,
+	}
+	return result, nil
+}
+
+// GetFishByID retrieves a fish by its ID
+func (a *MongoDBAdapter) GetFishByID(ctx context.Context, id string) (map[string]interface{}, error) {
+	return a.db.GetFishByID(ctx, id)
+}
+
+// SaveTranslatedFish saves translated fish data to MongoDB
+func (a *MongoDBAdapter) SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error {
+	return a.db.SaveTranslatedFish(ctx, translatedFish)
+}
+
+// GetTranslatedFish retrieves a translated fish by original ID
+func (a *MongoDBAdapter) GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error) {
+	return a.db.GetTranslatedFish(ctx, originalID)
+}
+
+// GetUntranslatedFishIDs retrieves IDs of fish that haven't been translated yet
+func (a *MongoDBAdapter) GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error) {
+	return a.db.GetUntranslatedFishIDs(ctx, limit)
 }
 
 // Helper functions to convert between MongoDB and data types

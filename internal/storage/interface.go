@@ -27,10 +27,16 @@ type StorageAdapter interface {
 	GetSimilarFish(ctx context.Context, dataSource string, rarityLevel string) (*fish.Fish, error)
 	GetFishByRegion(ctx context.Context, regionID string, limit int) ([]*fish.Fish, error)
 	GetFishByDataSource(ctx context.Context, dataSource string, limit int) ([]*fish.Fish, error)
+	GetFishByID(ctx context.Context, id string) (map[string]interface{}, error)
 
 	// Persistence operations for news and generation queue
 	SaveUsedNewsIDs(ctx context.Context, usedIDs map[string]bool) error
 	GetUsedNewsIDs(ctx context.Context) (map[string]bool, error)
 	SaveGenerationQueue(ctx context.Context, queue []data.GenerationRequest) error
 	GetGenerationQueue(ctx context.Context) ([]data.GenerationRequest, error)
+
+	// Translation operations
+	SaveTranslatedFish(ctx context.Context, translatedFish *data.TranslatedFish) error
+	GetTranslatedFish(ctx context.Context, originalID string) (*data.TranslatedFish, error)
+	GetUntranslatedFishIDs(ctx context.Context, limit int) ([]string, error)
 }

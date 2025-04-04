@@ -235,8 +235,8 @@ func (m *DataManager) collectInitialData(ctx context.Context) {
 	// Load persistent state from database
 	m.loadPersistentState(ctx)
 
-	// First, mark all existing news as used to prevent reuse
-	m.markAllExistingNewsAsUsed(ctx)
+	// We no longer mark all existing news as used at startup
+	// This allows using older news for generations
 
 	// Collect weather data for each region
 	for _, region := range m.regions {
@@ -589,6 +589,11 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 	var contextSummary []string
 	sourcesAvailable := 0
 
+	// Log how many merged news items we have for debugging
+	if len(m.mergedNewsItems) > 0 {
+		logFish("Using %d merged news items for this fish generation", len(m.mergedNewsItems))
+	}
+
 	// Always add primary news data first
 	contextSummary = append(contextSummary, fmt.Sprintf("PRIMARY NEWS: \"%s\" (%.2f sentiment, %s)",
 		m.lastNewsData.Headline, m.lastNewsData.Sentiment, m.lastNewsData.Category))
@@ -845,7 +850,7 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		// Create current time once to ensure consistent timestamps
 		timestamp := time.Now()
 
-		// Create a list of articles used to generate this fish
+		// Always add the primary news article
 		usedArticles := []map[string]interface{}{
 			{
 				"headline":  m.lastNewsData.Headline,
@@ -856,23 +861,31 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 				"keywords":  m.lastNewsData.Keywords,
 				"published": m.lastNewsData.PublishedAt,
 				"used_at":   timestamp,
+				"is_merged": false,
 			},
 		}
 
-		// Add the merged news items if they were used
-		for _, news := range m.mergedNewsItems {
-			usedArticles = append(usedArticles, map[string]interface{}{
-				"headline":  news.Headline,
-				"source":    news.Source,
-				"url":       news.URL,
-				"category":  news.Category,
-				"sentiment": news.Sentiment,
-				"keywords":  news.Keywords,
-				"published": news.PublishedAt,
-				"used_at":   timestamp,
-				"is_merged": true,
-			})
+		// Add all merged news items to the used articles
+		if len(m.mergedNewsItems) > 0 {
+			for _, news := range m.mergedNewsItems {
+				if news != nil {
+					usedArticles = append(usedArticles, map[string]interface{}{
+						"headline":  news.Headline,
+						"source":    news.Source,
+						"url":       news.URL,
+						"category":  news.Category,
+						"sentiment": news.Sentiment,
+						"keywords":  news.Keywords,
+						"published": news.PublishedAt,
+						"used_at":   timestamp,
+						"is_merged": true,
+					})
+				}
+			}
 		}
+
+		// Log the number of articles being saved
+		logFish("Saving fish with %d used articles", len(usedArticles))
 
 		// Create a structured fish data object that matches the MongoDB schema exactly
 		fish := map[string]interface{}{
@@ -880,29 +893,29 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 			"description":       fishData.Description,
 			"rarity":            rarity,
 			"length":            lengthMeters,
-			"weight":            weightKg,       // Use our calculated weight
-			"color":             fishData.Color, // Now coming from AI instead of default
+			"weight":            weightKg,
+			"color":             fishData.Color,
 			"habitat":           fishData.Habitat,
-			"diet":              fishData.Diet, // Now coming from AI instead of default
+			"diet":              fishData.Diet,
 			"generated_at":      timestamp,
 			"is_ai_generated":   true,
 			"data_source":       "gemini-ai",
 			"region_id":         regionID,
 			"generation_reason": reason,
-			"favorite_weather":  fishData.FavoriteWeather, // New field for catch mechanics
-			"catch_chance":      catchChance,              // New field for catch mechanics
-			"existence_reason":  fishData.ExistenceReason, // Why this fish exists
-			"used_articles":     usedArticles,             // Track which news articles were used
+			"favorite_weather":  fishData.FavoriteWeather,
+			"catch_chance":      catchChance,
+			"existence_reason":  fishData.ExistenceReason,
+			"used_articles":     usedArticles,
 			"stat_effects": []map[string]interface{}{
 				{
 					"effect_type":  "environment",
-					"modifier":     fishData.CatchChance / 100.0, // Convert percentage to decimal
+					"modifier":     fishData.CatchChance / 100.0,
 					"description":  fishData.Effect,
-					"weather_type": fishData.FavoriteWeather, // For weather-based bonuses
+					"weather_type": fishData.FavoriteWeather,
 				},
 				{
 					"effect_type": "player",
-					"modifier":    fishData.Value / 1000.0, // Value affects player stat gains
+					"modifier":    fishData.Value / 1000.0,
 					"description": "Affects player abilities based on fish value",
 				},
 			},
@@ -925,10 +938,19 @@ func (m *DataManager) generateFishFromData(ctx context.Context, reason string) {
 		}
 	}
 
-	// After successful generation, mark the current news as used
+	// After successful generation, mark all used news as used
 	newsID := m.lastNewsData.Source + ":" + m.lastNewsData.Headline
 	m.usedNewsIDs[newsID] = true
 	logNews("Marked news item as used for generation: %s", truncateString(m.lastNewsData.Headline, 50))
+
+	// Also mark all merged news items as used
+	for _, mergedNews := range m.mergedNewsItems {
+		if mergedNews != nil {
+			mergedNewsID := mergedNews.Source + ":" + mergedNews.Headline
+			m.usedNewsIDs[mergedNewsID] = true
+			logNews("Marked merged news item as used for generation: %s", truncateString(mergedNews.Headline, 50))
+		}
+	}
 
 	// Save the updated used news IDs to the database
 	go m.savePersistentState(ctx)
@@ -1032,154 +1054,6 @@ func (m *DataManager) GetCollectors() []DataCollector {
 		m.newsCollector,
 	}
 	return collectors
-}
-
-// markAllExistingNewsAsUsed fetches and marks all existing news items as used
-func (m *DataManager) markAllExistingNewsAsUsed(ctx context.Context) {
-	if m.db == nil {
-		logError("Cannot mark existing news as used: database not available")
-		return
-	}
-
-	// Fetch a larger batch of recent news items to mark as used
-	recentNews, err := m.db.GetRecentNewsData(ctx, 50)
-	if err != nil {
-		logError("Failed to fetch existing news items: %v", err)
-		return
-	}
-
-	count := 0
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	for _, news := range recentNews {
-		newsID := news.Source + ":" + news.Headline
-		if !m.usedNewsIDs[newsID] {
-			m.usedNewsIDs[newsID] = true
-			count++
-		}
-	}
-
-	// Save the updated used news IDs to database
-	m.mu.Unlock()
-	if count > 0 {
-		m.savePersistentState(ctx)
-	}
-	m.mu.Lock()
-
-	logNews("Marked %d existing news items as used at startup", count)
-}
-
-// queueFishGeneration adds a fish generation request to the queue
-func (m *DataManager) queueFishGeneration(ctx context.Context, reason string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Add request to queue
-	request := GenerationRequest{
-		Reason:  reason,
-		AddedAt: time.Now(),
-	}
-
-	m.generationQueue = append(m.generationQueue, request)
-	logFish("Added fish generation request to queue: %s (queue size: %d)",
-		reason, len(m.generationQueue))
-
-	// Persist the updated queue
-	go m.savePersistentState(ctx)
-
-	// Start the queue processor if it's not already running
-	if !m.queueProcessRunning {
-		m.startQueueProcessor(ctx)
-	}
-}
-
-// processGenerationQueue processes the fish generation queue with proper timing
-func (m *DataManager) processGenerationQueue() {
-	defer func() {
-		m.mu.Lock()
-		m.queueProcessRunning = false
-		m.mu.Unlock()
-
-		// Recover from panics to prevent crashing the app
-		if r := recover(); r != nil {
-			logError("Recovered from panic in queue processor: %v", r)
-		}
-	}()
-
-	for {
-		// Check cooldown status first
-		m.mu.Lock()
-		currentTime := time.Now()
-		timeUntilReady := time.Duration(0)
-		if !m.lastFishGeneration.IsZero() {
-			elapsed := currentTime.Sub(m.lastFishGeneration)
-			if elapsed < m.generationCooldown {
-				timeUntilReady = m.generationCooldown - elapsed
-			}
-		}
-		m.mu.Unlock()
-
-		// If we're on cooldown, just wait once without spamming logs
-		if timeUntilReady > 0 {
-			// Need to wait for cooldown to expire
-			waitTime := timeUntilReady
-
-			// Ensure wait time is never negative
-			if waitTime < 0 {
-				waitTime = 0
-			}
-
-			logFish("Waiting %v for cooldown before processing next request",
-				waitTime.Round(time.Second))
-			if waitTime > 0 {
-				time.Sleep(waitTime)
-			}
-			// After waiting, continue to processing
-		}
-
-		// Only check for news if we're not on cooldown anymore
-		m.mu.Lock()
-		hasQueueItems := len(m.generationQueue) > 0
-		m.mu.Unlock()
-
-		// If queue is empty, try to find news to process
-		if !hasQueueItems {
-			// Check if we need to process any pending news items
-			m.checkPendingNewsForGeneration(context.Background())
-
-			// Check again if we added anything to the queue
-			m.mu.Lock()
-			hasQueueItems = len(m.generationQueue) > 0
-			m.mu.Unlock()
-
-			// If still no items, don't exit but wait and check again for new news items
-			if !hasQueueItems {
-				logFish("No generation requests found, waiting for 5 minutes before checking again")
-				time.Sleep(5 * time.Minute)
-				continue
-			}
-		}
-
-		// Process a queue item
-		m.mu.Lock()
-		request := m.generationQueue[0]
-		m.generationQueue = m.generationQueue[1:]
-		queueLen := len(m.generationQueue)
-		m.mu.Unlock()
-
-		// Update the persistent queue state after removing an item
-		ctx := context.Background()
-		if request.Ctx != nil {
-			ctx = request.Ctx
-		}
-		go m.savePersistentState(ctx)
-
-		// Process the request (with proper locking inside the method)
-		logFish("Processing queued fish generation: %s (remaining in queue: %d)",
-			request.Reason, queueLen)
-		m.generateFishWithLock(ctx, request.Reason)
-	}
 }
 
 // checkPendingNewsForGeneration checks for unused news in the same category and queues them for generation
@@ -1424,4 +1298,116 @@ func (m *DataManager) startQueueProcessor(ctx context.Context) {
 
 		m.processGenerationQueue()
 	}()
+}
+
+// queueFishGeneration adds a fish generation request to the queue
+func (m *DataManager) queueFishGeneration(ctx context.Context, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Add request to queue
+	request := GenerationRequest{
+		Reason:  reason,
+		AddedAt: time.Now(),
+	}
+
+	m.generationQueue = append(m.generationQueue, request)
+	logFish("Added fish generation request to queue: %s (queue size: %d)",
+		reason, len(m.generationQueue))
+
+	// Persist the updated queue
+	go m.savePersistentState(ctx)
+
+	// Start the queue processor if it's not already running
+	if !m.queueProcessRunning {
+		m.startQueueProcessor(ctx)
+	}
+}
+
+// processGenerationQueue processes the fish generation queue with proper timing
+func (m *DataManager) processGenerationQueue() {
+	defer func() {
+		m.mu.Lock()
+		m.queueProcessRunning = false
+		m.mu.Unlock()
+
+		// Recover from panics to prevent crashing the app
+		if r := recover(); r != nil {
+			logError("Recovered from panic in queue processor: %v", r)
+		}
+	}()
+
+	for {
+		// Check cooldown status first
+		m.mu.Lock()
+		currentTime := time.Now()
+		timeUntilReady := time.Duration(0)
+		if !m.lastFishGeneration.IsZero() {
+			elapsed := currentTime.Sub(m.lastFishGeneration)
+			if elapsed < m.generationCooldown {
+				timeUntilReady = m.generationCooldown - elapsed
+			}
+		}
+		m.mu.Unlock()
+
+		// If we're on cooldown, just wait once without spamming logs
+		if timeUntilReady > 0 {
+			// Need to wait for cooldown to expire
+			waitTime := timeUntilReady
+
+			// Ensure wait time is never negative
+			if waitTime < 0 {
+				waitTime = 0
+			}
+
+			logFish("Waiting %v for cooldown before processing next request",
+				waitTime.Round(time.Second))
+			if waitTime > 0 {
+				time.Sleep(waitTime)
+			}
+			// After waiting, continue to processing
+		}
+
+		// Only check for news if we're not on cooldown anymore
+		m.mu.Lock()
+		hasQueueItems := len(m.generationQueue) > 0
+		m.mu.Unlock()
+
+		// If queue is empty, try to find news to process
+		if !hasQueueItems {
+			// Check if we need to process any pending news items
+			m.checkPendingNewsForGeneration(context.Background())
+
+			// Check again if we added anything to the queue
+			m.mu.Lock()
+			hasQueueItems = len(m.generationQueue) > 0
+			m.mu.Unlock()
+
+			// If still no items, don't exit but wait and check again for new news items
+			if !hasQueueItems {
+				logFish("No generation requests found, waiting for 5 minutes before checking again")
+				time.Sleep(5 * time.Minute)
+				continue
+			}
+		}
+
+		// Process a queue item
+		m.mu.Lock()
+		request := m.generationQueue[0]
+		m.generationQueue = m.generationQueue[1:]
+		queueLen := len(m.generationQueue)
+		m.mu.Unlock()
+
+		// Update the persistent queue state after removing an item
+		ctx := context.Background()
+		if request.Ctx != nil {
+			ctx = request.Ctx
+		}
+		go m.savePersistentState(ctx)
+
+		// Process the request (with proper locking inside the method)
+		logFish("Processing queued fish generation: %s (remaining in queue: %d)",
+			request.Reason, queueLen)
+		m.generateFishWithLock(ctx, request.Reason)
+	}
 }
