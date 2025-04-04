@@ -1126,12 +1126,28 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 	// Get recent news from database grouped by category to find pairs
 	recentNews, err := m.db.GetRecentNewsData(ctx, 30) // Check a good number of recent news
 	if err != nil || len(recentNews) == 0 {
+		logNews("No recent news found, skipping fish generation")
 		return
 	}
 
 	// Find pairs of unused news with the same category
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Check if we have any unused news at all
+	hasUnusedNews := false
+	for _, news := range recentNews {
+		newsID := news.Source + ":" + news.Headline
+		if !m.usedNewsIDs[newsID] {
+			hasUnusedNews = true
+			break
+		}
+	}
+
+	if !hasUnusedNews {
+		logNews("No new unused news available, skipping fish generation")
+		return
+	}
 
 	// Group news by category
 	newsByCategory := make(map[string][]*NewsItem)
@@ -1144,6 +1160,7 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 	}
 
 	// Check each category for at least 2 unused news items
+	foundPair := false
 	for category, newsItems := range newsByCategory {
 		if len(newsItems) >= 2 {
 			// Get the two most recent news items in this category
@@ -1181,8 +1198,47 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 			go m.savePersistentState(ctx)
 
 			// Only process one pair at a time to prevent too many generations
+			foundPair = true
 			break
 		}
+	}
+
+	// If no pairs found but we have at least one unused news item, use it individually
+	if !foundPair && !m.settings.TestMode { // In production mode, we can use single news items
+		for _, newsItems := range newsByCategory {
+			if len(newsItems) > 0 {
+				news := newsItems[0]
+				newsID := news.Source + ":" + news.Headline
+
+				// Queue generation with this individual news item
+				reason := fmt.Sprintf("news [%s]: %s",
+					news.Category,
+					truncateString(news.Headline, 40))
+
+				logNews("No pairs found, using single news item: %s", truncateString(news.Headline, 40))
+
+				// Create a request and add it to the queue
+				req := GenerationRequest{
+					Ctx:     ctx,
+					Reason:  reason,
+					AddedAt: time.Now(),
+				}
+
+				// Store news for generation
+				m.lastNewsData = news
+				m.mergedNewsItem = nil
+				m.generationQueue = append(m.generationQueue, req)
+
+				// Mark as used
+				m.usedNewsIDs[newsID] = true
+
+				// Save to database in background
+				go m.savePersistentState(ctx)
+				break
+			}
+		}
+	} else if !foundPair {
+		logNews("No news pairs found, skipping generation until new news arrives")
 	}
 }
 
