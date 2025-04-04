@@ -1020,18 +1020,8 @@ func (m *DataManager) processGenerationQueue() {
 	}()
 
 	for {
-		// Check if we need to process any pending news items
-		m.checkPendingNewsForGeneration(context.Background())
-
-		// Check if there's anything in the queue
+		// Check cooldown status first
 		m.mu.Lock()
-		if len(m.generationQueue) == 0 {
-			m.mu.Unlock()
-			logFish("Generation queue empty, stopping processor")
-			return
-		}
-
-		// Check cooldown status
 		currentTime := time.Now()
 		timeUntilReady := time.Duration(0)
 		if !m.lastFishGeneration.IsZero() {
@@ -1040,7 +1030,9 @@ func (m *DataManager) processGenerationQueue() {
 				timeUntilReady = m.generationCooldown - elapsed
 			}
 		}
+		m.mu.Unlock()
 
+		// If we're on cooldown, just wait once without spamming logs
 		if timeUntilReady > 0 {
 			// Need to wait for cooldown to expire
 			waitTime := timeUntilReady
@@ -1049,17 +1041,39 @@ func (m *DataManager) processGenerationQueue() {
 			if waitTime < 0 {
 				waitTime = 0
 			}
-			m.mu.Unlock()
 
 			logFish("Waiting %v for cooldown before processing next request",
 				waitTime.Round(time.Second))
 			if waitTime > 0 {
 				time.Sleep(waitTime)
 			}
-			continue
+			// After waiting, continue to processing
 		}
 
-		// Get the next request and remove it from the queue
+		// Only check for news if we're not on cooldown anymore
+		m.mu.Lock()
+		hasQueueItems := len(m.generationQueue) > 0
+		m.mu.Unlock()
+
+		// If queue is empty, try to find news to process but only if we're not on cooldown
+		if !hasQueueItems {
+			// Check if we need to process any pending news items
+			m.checkPendingNewsForGeneration(context.Background())
+
+			// Check again if we added anything to the queue
+			m.mu.Lock()
+			hasQueueItems = len(m.generationQueue) > 0
+			m.mu.Unlock()
+
+			// If still no items, exit the processor
+			if !hasQueueItems {
+				logFish("No generation requests found, stopping processor")
+				return
+			}
+		}
+
+		// Process a queue item
+		m.mu.Lock()
 		request := m.generationQueue[0]
 		m.generationQueue = m.generationQueue[1:]
 		queueLen := len(m.generationQueue)
@@ -1076,21 +1090,6 @@ func (m *DataManager) processGenerationQueue() {
 		logFish("Processing queued fish generation: %s (remaining in queue: %d)",
 			request.Reason, queueLen)
 		m.generateFishWithLock(ctx, request.Reason)
-
-		// If the queue is empty, check for any news we can process for generation
-		if queueLen == 0 {
-			logFish("Generation queue processed completely, checking for available news pairs")
-			m.checkPendingNewsForGeneration(ctx)
-
-			// Check if we've added new items to the queue
-			m.mu.Lock()
-			if len(m.generationQueue) == 0 {
-				m.mu.Unlock()
-				logFish("No new generation requests found, exiting processor")
-				return
-			}
-			m.mu.Unlock()
-		}
 	}
 }
 
@@ -1105,11 +1104,12 @@ func (m *DataManager) checkPendingNewsForGeneration(ctx context.Context) {
 	timeSinceLastGeneration := currentTime.Sub(m.lastFishGeneration)
 	if !m.lastFishGeneration.IsZero() && timeSinceLastGeneration < m.generationCooldown {
 		m.mu.Unlock()
+		// Don't log when skipping due to cooldown - this prevents log spam
 		return // Still on cooldown
 	}
-	m.mu.Unlock()
 
 	// Get recent news from database grouped by category to find pairs
+	m.mu.Unlock()
 	recentNews, err := m.db.GetRecentNewsData(safeCtx, 30) // Check a good number of recent news
 	if err != nil || len(recentNews) == 0 {
 		logNews("No recent news found, skipping fish generation")

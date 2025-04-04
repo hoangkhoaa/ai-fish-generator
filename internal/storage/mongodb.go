@@ -92,6 +92,7 @@ type FishData struct {
 	PriceIDs         []primitive.ObjectID     `bson:"price_ids,omitempty"`
 	StatEffects      []map[string]interface{} `bson:"stat_effects,omitempty"`
 	GenerationReason string                   `bson:"generation_reason,omitempty"`
+	UsedArticles     []map[string]interface{} `bson:"used_articles,omitempty"`
 }
 
 // CollectionStats tracks statistics about each collection
@@ -566,6 +567,11 @@ func (m *MongoDB) SaveFishData(ctx context.Context, fish interface{}) error {
 		// Complex fields
 		if effects, ok := f["stat_effects"].([]map[string]interface{}); ok {
 			fishData.StatEffects = effects
+		}
+
+		// Add handling for used articles
+		if articles, ok := f["used_articles"].([]map[string]interface{}); ok {
+			fishData.UsedArticles = articles
 		}
 	default:
 		// Try to convert from a fish type that implements required methods
