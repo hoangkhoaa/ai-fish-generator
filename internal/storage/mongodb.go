@@ -1265,73 +1265,163 @@ func (m *MongoDB) GetUntranslatedFish(ctx context.Context, limit int) ([]map[str
 	return results, nil
 }
 
-// UpdateFishWithTranslation updates a fish document with translated fields
+// UpdateFishWithTranslation updates a fish with translated fields
 func (m *MongoDB) UpdateFishWithTranslation(ctx context.Context, fishID interface{}, translatedFish map[string]interface{}) error {
-	// Convert string ID to ObjectID if needed
-	var objectID primitive.ObjectID
-	switch id := fishID.(type) {
-	case string:
-		var err error
-		objectID, err = primitive.ObjectIDFromHex(id)
-		if err != nil {
-			return fmt.Errorf("invalid fish ID format: %w", err)
-		}
-	case primitive.ObjectID:
-		objectID = id
-	default:
-		// Try to use the _id directly as provided
-		objectID, _ = fishID.(primitive.ObjectID)
+	collection := m.client.Database(m.database).Collection(fishCollection)
+
+	// Log the translated fields for debugging
+	log.Printf("Updating fish with translation. Fish ID: %v", fishID)
+
+	// Validate all string fields recursively before saving
+	err := validateAndSanitizeMap(translatedFish)
+	if err != nil {
+		log.Printf("Error validating translated fish: %v", err)
+		return err
 	}
 
 	// Create the filter using the ID
-	filter := bson.M{"_id": objectID}
+	var filter bson.M
+	switch id := fishID.(type) {
+	case string:
+		objectID, err := primitive.ObjectIDFromHex(id)
+		if err != nil {
+			return fmt.Errorf("invalid fish ID format: %w", err)
+		}
+		filter = bson.M{"_id": objectID}
+	case primitive.ObjectID:
+		filter = bson.M{"_id": id}
+	default:
+		// Try to use the ID as provided
+		filter = bson.M{"_id": fishID}
+	}
 
-	// Validate all string fields to ensure they are valid UTF-8
-	// This is a defensive measure to prevent BSON encoding errors
-	for key, value := range translatedFish {
-		// Skip non-string fields
-		if strValue, ok := value.(string); ok {
-			// If we find an invalid UTF-8 string, replace it with a valid one
-			if !utf8.ValidString(strValue) {
-				translatedFish[key] = strings.ToValidUTF8(strValue, "\uFFFD")
-				log.Printf("Fixed invalid UTF-8 in field: %s", key)
+	// Create a set of updates for each field to add
+	update := bson.M{"$set": translatedFish}
+
+	// Find the fish by ID and update it
+	_, err = collection.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("error updating fish with translation: %w", err)
+	}
+	return nil
+}
+
+// validateAndSanitizeMap validates and sanitizes all string fields in a map recursively
+func validateAndSanitizeMap(dataMap map[string]interface{}) error {
+	for key, value := range dataMap {
+		// Skip _id and other non-string special fields
+		if key == "_id" {
+			continue
+		}
+
+		switch v := value.(type) {
+		case string:
+			// Check if the string is valid UTF-8
+			if !utf8.ValidString(v) {
+				log.Printf("Found invalid UTF-8 in field '%s', sanitizing it", key)
+
+				// Apply the SanitizeUTF8 function from data package
+				sanitized := data.SanitizeUTF8(v)
+
+				// Update the map with the sanitized value
+				dataMap[key] = sanitized
+
+				// Log the before and after for debugging
+				log.Printf("Sanitized '%s': '%s' -> '%s'", key, v, sanitized)
 			}
-		} else if mapValue, ok := value.(map[string]interface{}); ok {
-			// For nested maps, check each string value
-			for nestedKey, nestedValue := range mapValue {
-				if nestedStrValue, ok := nestedValue.(string); ok {
-					if !utf8.ValidString(nestedStrValue) {
-						mapValue[nestedKey] = strings.ToValidUTF8(nestedStrValue, "\uFFFD")
-						log.Printf("Fixed invalid UTF-8 in nested field: %s.%s", key, nestedKey)
+
+			// Extra validation for Vietnamese strings (fields ending with _vi)
+			if strings.HasSuffix(key, "_vi") {
+				// Check for problematic Vietnamese characters
+				for _, ch := range v {
+					// If character is outside the normal Vietnamese range and not ASCII
+					if ch > 0x1000 && !isValidVietnameseChar(ch) {
+						log.Printf("Found potentially problematic character %U in Vietnamese field '%s'", ch, key)
+
+						// Replace with sanitized version
+						dataMap[key] = data.SanitizeUTF8(v)
+						break
 					}
 				}
 			}
-		} else if arrayValue, ok := value.([]interface{}); ok {
-			// For array values, check if they contain maps with strings
-			for i, item := range arrayValue {
+
+		case []interface{}:
+			// Handle arrays
+			for i, item := range v {
 				if itemMap, ok := item.(map[string]interface{}); ok {
-					for itemKey, itemValue := range itemMap {
-						if itemStrValue, ok := itemValue.(string); ok {
-							if !utf8.ValidString(itemStrValue) {
-								itemMap[itemKey] = strings.ToValidUTF8(itemStrValue, "\uFFFD")
-								log.Printf("Fixed invalid UTF-8 in array field: %s[%d].%s", key, i, itemKey)
-							}
-						}
+					err := validateAndSanitizeMap(itemMap)
+					if err != nil {
+						return err
+					}
+					// Update the array item
+					v[i] = itemMap
+				} else if itemStr, ok := item.(string); ok {
+					// Sanitize string array items
+					if !utf8.ValidString(itemStr) {
+						v[i] = data.SanitizeUTF8(itemStr)
 					}
 				}
+			}
+
+		case map[string]interface{}:
+			// Recursively validate nested maps
+			err := validateAndSanitizeMap(v)
+			if err != nil {
+				return err
 			}
 		}
 	}
 
-	// Define the update operation (replace the entire document)
-	update := bson.M{"$set": translatedFish}
+	return nil
+}
 
-	// Execute the update
-	coll := m.client.Database(m.database).Collection(fishCollection)
-	_, err := coll.UpdateOne(ctx, filter, update)
-	if err != nil {
-		return fmt.Errorf("error updating fish with translation: %w", err)
+// isValidVietnameseChar checks if a character is valid for Vietnamese text
+// This covers the Vietnamese-specific characters in Unicode
+func isValidVietnameseChar(r rune) bool {
+	// Basic Latin (includes ASCII)
+	if r <= 0x007F {
+		return true
 	}
 
-	return nil
+	// Latin-1 Supplement (includes à, é, etc.)
+	if r >= 0x00A0 && r <= 0x00FF {
+		return true
+	}
+
+	// Latin Extended-A (includes đ)
+	if r >= 0x0100 && r <= 0x017F {
+		return true
+	}
+
+	// Latin Extended-B
+	if r >= 0x0180 && r <= 0x024F {
+		return true
+	}
+
+	// Latin Extended Additional (includes Vietnamese combining characters)
+	if r >= 0x1E00 && r <= 0x1EFF {
+		return true
+	}
+
+	// General Punctuation
+	if r >= 0x2000 && r <= 0x206F {
+		return true
+	}
+
+	// Currency Symbols
+	if r >= 0x20A0 && r <= 0x20CF {
+		return true
+	}
+
+	// Letterlike Symbols
+	if r >= 0x2100 && r <= 0x214F {
+		return true
+	}
+
+	// Common CJK characters that might be used
+	if r >= 0x3000 && r <= 0x30FF {
+		return true
+	}
+
+	return false
 }

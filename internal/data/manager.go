@@ -1553,6 +1553,51 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	// Get the first untranslated fish
 	fishToTranslate := untranslatedFish[0]
 
+	// Log that we're about to attempt translation
+	logTranslation("Found untranslated fish, preparing for translation")
+
+	// Pre-sanitize ALL fields in the source fish
+	// This is especially important for origin context that might contain news headlines with formatting issues
+	for key, value := range fishToTranslate {
+		if strValue, ok := value.(string); ok {
+			fishToTranslate[key] = SanitizeUTF8(strValue)
+		}
+	}
+
+	// Check specifically for fish containing the problematic "MISSING" text
+	var containsMissing bool
+	for key, val := range fishToTranslate {
+		if strVal, ok := val.(string); ok {
+			if strings.Contains(strVal, "MISSING") || strings.Contains(strVal, "%!") {
+				logTranslation("Found problematic string in field '%s': %s", key, strVal)
+				containsMissing = true
+				fishToTranslate[key] = SanitizeUTF8(strVal)
+			}
+		}
+	}
+
+	if containsMissing {
+		logTranslation("This fish contained problematic formatting characters, applying extra sanitization")
+
+		// Double sanitize the used_articles field which might contain problematic headlines
+		if usedArticles, ok := fishToTranslate["used_articles"].([]interface{}); ok {
+			for i, article := range usedArticles {
+				if articleMap, ok := article.(map[string]interface{}); ok {
+					for field, value := range articleMap {
+						if strValue, ok := value.(string); ok {
+							// Apply extra sanitization for article headlines
+							articleMap[field] = SanitizeUTF8(strValue)
+						}
+					}
+					// Update the article in place
+					usedArticles[i] = articleMap
+				}
+			}
+			// Update the used_articles field
+			fishToTranslate["used_articles"] = usedArticles
+		}
+	}
+
 	// Pre-validate all string fields to ensure valid UTF-8
 	// This helps identify problematic fields before we try to use them
 	for key, value := range fishToTranslate {
@@ -1565,7 +1610,7 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	}
 
 	// Start translation
-	logTranslation("Translating fish: %s", fishToTranslate["name"])
+	logTranslation("Translating fish: %s", extractStringFieldSafely(fishToTranslate, "name", "Unnamed Fish"))
 
 	// Extract fields to translate - add defensive extraction with defaults
 	fieldsToTranslate := TranslationFields{
@@ -1624,6 +1669,17 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		return
 	}
 
+	// Final validation of all translation fields
+	fieldsToTranslate.Name = SanitizeUTF8(fieldsToTranslate.Name)
+	fieldsToTranslate.Description = SanitizeUTF8(fieldsToTranslate.Description)
+	fieldsToTranslate.Color = SanitizeUTF8(fieldsToTranslate.Color)
+	fieldsToTranslate.Diet = SanitizeUTF8(fieldsToTranslate.Diet)
+	fieldsToTranslate.Habitat = SanitizeUTF8(fieldsToTranslate.Habitat)
+	fieldsToTranslate.FavoriteWeather = SanitizeUTF8(fieldsToTranslate.FavoriteWeather)
+	fieldsToTranslate.ExistenceReason = SanitizeUTF8(fieldsToTranslate.ExistenceReason)
+	fieldsToTranslate.Effect = SanitizeUTF8(fieldsToTranslate.Effect)
+	fieldsToTranslate.PlayerEffect = SanitizeUTF8(fieldsToTranslate.PlayerEffect)
+
 	// Translate the fish
 	translatedFields, err := m.translatorClient.TranslateFish(ctx, fieldsToTranslate)
 	if err != nil {
@@ -1645,17 +1701,17 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 	}
 
 	// Explicitly set translated fields as new fields with _vi suffix
-	translatedFish["name_vi"] = translatedFields.Name
-	translatedFish["description_vi"] = translatedFields.Description
-	translatedFish["color_vi"] = translatedFields.Color
-	translatedFish["diet_vi"] = translatedFields.Diet
-	translatedFish["existence_reason_vi"] = translatedFields.ExistenceReason
+	translatedFish["name_vi"] = SanitizeUTF8(translatedFields.Name)
+	translatedFish["description_vi"] = SanitizeUTF8(translatedFields.Description)
+	translatedFish["color_vi"] = SanitizeUTF8(translatedFields.Color)
+	translatedFish["diet_vi"] = SanitizeUTF8(translatedFields.Diet)
+	translatedFish["existence_reason_vi"] = SanitizeUTF8(translatedFields.ExistenceReason)
 	translatedFish["is_translated"] = true
 	translatedFish["translated_at"] = time.Now()
 
 	// Set habitat if it exists
 	if translatedFields.Habitat != "" {
-		translatedFish["habitat_vi"] = translatedFields.Habitat
+		translatedFish["habitat_vi"] = SanitizeUTF8(translatedFields.Habitat)
 	}
 
 	// Handle stat effects with extra care
@@ -1679,10 +1735,10 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 					// Add translated fields
 					effectType, _ := effect["effect_type"].(string)
 					if effectType == "environment" {
-						translatedEffect["description_vi"] = translatedFields.Effect
-						translatedEffect["weather_type_vi"] = translatedFields.FavoriteWeather
+						translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.Effect)
+						translatedEffect["weather_type_vi"] = SanitizeUTF8(translatedFields.FavoriteWeather)
 					} else if effectType == "player" {
-						translatedEffect["description_vi"] = translatedFields.PlayerEffect
+						translatedEffect["description_vi"] = SanitizeUTF8(translatedFields.PlayerEffect)
 					}
 
 					translatedStatEffects = append(translatedStatEffects, translatedEffect)
@@ -1693,7 +1749,17 @@ func (m *DataManager) checkForFishToTranslate(ctx context.Context) {
 		}
 	}
 
-	translatedFish["favorite_weather_vi"] = translatedFields.FavoriteWeather
+	translatedFish["favorite_weather_vi"] = SanitizeUTF8(translatedFields.FavoriteWeather)
+
+	// Final check of all translated fields to ensure they are valid UTF-8
+	for key, value := range translatedFish {
+		if strValue, ok := value.(string); ok {
+			if !utf8.ValidString(strValue) {
+				logTranslation("Final sanitization for field '%s'", key)
+				translatedFish[key] = SanitizeUTF8(strValue)
+			}
+		}
+	}
 
 	// Save the translated fish back to the database
 	fishID := fishToTranslate["_id"]
